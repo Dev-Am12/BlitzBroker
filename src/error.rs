@@ -7,7 +7,7 @@ use std::fmt;
 /// Every variant here must correspond to a documented rejection path —
 /// see AI_GUARDRAILS.md rule 3: parsers must never panic on untrusted
 /// input, they must return one of these instead.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ProtocolError {
     /// Not enough bytes have arrived yet to parse a full packet. Not fatal
     /// — connection.rs should keep buffering and retry once more bytes
