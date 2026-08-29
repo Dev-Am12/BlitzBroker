@@ -16,4 +16,4 @@ Numbered log of load-bearing project decisions, in the order they were made. Add
 
 7. **Package Killer bonus target: `mqtt` / `aedes` (npm).** These are the packages most commonly installed for the same local pub/sub use case this project addresses from scratch.
 
-8. **Project name: BlitzBroker.**
+8. **Topic wildcard matching (extra scope, PLAN.md §4 item 1): filter validation and the topic/filter matching predicate live in `protocol.rs` (Role B), not `broker.rs`.** `validate_topic_filter` (called from `decode_subscribe`/`decode_unsubscribe`) rejects spec-illegal wildcard placement at parse time. `topic_matches_filter` is a standalone, iterative (not recursive — see its doc comment for why) pure function implementing §4.7.1's matching rules, fully unit-tested against the spec's own worked examples. **Not yet done:** `broker.rs`'s registry still does exact-string topic lookup (`HashMap<String, Vec<ConnectionId>>`) — swapping fan-out to use `topic_matches_filter` instead of exact match is a Role A integration step, intentionally left for them to review/wire in rather than editing their file directly.

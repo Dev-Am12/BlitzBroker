@@ -14,7 +14,7 @@ Fixed/variable header parsing, remaining-length encoding/decoding, all packet-ty
 - [x] PUBLISH (QoS 0)
 - [x] PINGREQ / PINGRESP, DISCONNECT
 - [x] Malformed/truncated/oversized-input rejection paths for every packet type (cite spec section for each)
-- [ ] (stretch) Topic wildcards (+, #)
+- [x] (stretch) Topic wildcards (+, #) — validation + matching predicate done; broker fan-out integration is a Role A step, see DECISIONS.md #9
 - [ ] (stretch) QoS 1 (PUBACK)
 
 ## Log

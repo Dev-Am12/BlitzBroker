@@ -394,6 +394,95 @@ fn encode_connack(p: &ConnAckPacket) -> Vec<u8> {
     prepend_fixed_header(PT_CONNACK, 0, body)
 }
 
+// --- Topic wildcards, §4.7 (extra scope: PLAN.md §4 item 1) ---
+//
+// A *topic filter* (used in SUBSCRIBE/UNSUBSCRIBE) may contain '+'
+// (single-level) and '#' (multi-level) wildcards. A *topic name* (used
+// in PUBLISH) must never contain either — already enforced in
+// decode_publish above. See DECISIONS.md #9 for scope notes: this file
+// validates filter syntax and provides the topic/filter matching
+// predicate; wiring that predicate into the broker's fan-out logic
+// (currently exact-match only, per broker.rs) is a Role A integration
+// step, not done here.
+
+/// Validate that a topic filter's wildcard usage is spec-legal.
+/// Does not check UTF-8 validity (already guaranteed by
+/// `decode_utf8_string`) or emptiness beyond §4.7.3's "at least one
+/// character" rule.
+pub fn validate_topic_filter(filter: &str) -> Result<(), ProtocolError> {
+    if filter.is_empty() {
+        return Err(ProtocolError::MalformedPayload(
+            "topic filter must be at least one character (§4.7.3)",
+        ));
+    }
+    let levels: Vec<&str> = filter.split('/').collect();
+    let last_index = levels.len() - 1;
+    for (i, level) in levels.iter().enumerate() {
+        if level.contains('#') {
+            if *level != "#" {
+                return Err(ProtocolError::MalformedPayload(
+                    "'#' must occupy an entire topic level on its own (§4.7.1.2)",
+                ));
+            }
+            if i != last_index {
+                return Err(ProtocolError::MalformedPayload(
+                    "'#' must be the last level in a topic filter (§4.7.1.2)",
+                ));
+            }
+        } else if level.contains('+') && *level != "+" {
+            return Err(ProtocolError::MalformedPayload(
+                "'+' must occupy an entire topic level on its own (§4.7.1.3)",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Does `topic` (a concrete published topic name — never itself
+/// containing wildcards) match `filter` (a subscription's topic
+/// filter, which may contain `+`/`#`)? Per §4.7.1's matching rules.
+///
+/// Implemented iteratively rather than recursively: `topic`/`filter`
+/// are attacker-influenced strings (arrive over the wire), and an
+/// adversarial input with a huge number of `/` characters must not
+/// risk a stack overflow — see AI_GUARDRAILS.md rule 3.
+///
+/// Callers should validate `filter` with `validate_topic_filter`
+/// first; this function does not itself reject a malformed filter, it
+/// just may not match anything.
+pub fn topic_matches_filter(topic: &str, filter: &str) -> bool {
+    let topic_levels: Vec<&str> = topic.split('/').collect();
+    let filter_levels: Vec<&str> = filter.split('/').collect();
+
+    let mut ti = 0usize;
+    let mut fi = 0usize;
+
+    while fi < filter_levels.len() {
+        let flevel = filter_levels[fi];
+        if flevel == "#" {
+            // '#' matches this level and everything below it,
+            // including zero remaining topic levels (e.g.
+            // "sport/#" matches the topic "sport" itself).
+            return true;
+        }
+        if ti >= topic_levels.len() {
+            // Filter has more (non-'#') levels than the topic has —
+            // can't match.
+            return false;
+        }
+        if flevel != "+" && flevel != topic_levels[ti] {
+            return false;
+        }
+        ti += 1;
+        fi += 1;
+    }
+
+    // Every filter level matched; only a match if the topic had no
+    // leftover levels (a filter with no trailing '#' can't match a
+    // longer topic).
+    ti == topic_levels.len()
+}
+
 // --- SUBSCRIBE / SUBACK, §3.8 / §3.9 ---
 
 fn decode_subscribe(body: &[u8]) -> Result<SubscribePacket, ProtocolError> {
@@ -414,6 +503,7 @@ fn decode_subscribe(body: &[u8]) -> Result<SubscribePacket, ProtocolError> {
         let (topic, consumed) = decode_utf8_string(&body[pos..])
             .map_err(|_| ProtocolError::MalformedPayload("truncated SUBSCRIBE topic filter (§3.8.3)"))?;
         pos += consumed;
+        validate_topic_filter(&topic)?;
         if pos >= body.len() {
             return Err(ProtocolError::MalformedPayload(
                 "SUBSCRIBE topic filter missing requested QoS byte (§3.8.3)",
@@ -471,6 +561,7 @@ fn decode_unsubscribe(body: &[u8]) -> Result<UnsubscribePacket, ProtocolError> {
         let (topic, consumed) = decode_utf8_string(&body[pos..])
             .map_err(|_| ProtocolError::MalformedPayload("truncated UNSUBSCRIBE topic filter (§3.10.3)"))?;
         pos += consumed;
+        validate_topic_filter(&topic)?;
         topic_filters.push(topic);
     }
 
@@ -878,6 +969,136 @@ mod tests {
         encode_utf8_string("a/+/b", &mut body);
         let bytes = prepend_fixed_header(PT_PUBLISH, 0, body);
         assert!(matches!(decode(&bytes), Err(ProtocolError::MalformedPayload(_))));
+    }
+
+    // --- Topic wildcards, §4.7 ---
+
+    #[test]
+    fn validate_filter_accepts_plain_topic() {
+        assert!(validate_topic_filter("sport/tennis/player1").is_ok());
+    }
+
+    #[test]
+    fn validate_filter_accepts_hash_alone() {
+        assert!(validate_topic_filter("#").is_ok());
+    }
+
+    #[test]
+    fn validate_filter_accepts_hash_as_last_level() {
+        assert!(validate_topic_filter("sport/tennis/player1/#").is_ok());
+    }
+
+    #[test]
+    fn validate_filter_rejects_hash_not_last() {
+        assert!(matches!(
+            validate_topic_filter("sport/#/player1"),
+            Err(ProtocolError::MalformedPayload(_))
+        ));
+    }
+
+    #[test]
+    fn validate_filter_rejects_hash_not_alone_in_level() {
+        assert!(matches!(
+            validate_topic_filter("sport/tennis#"),
+            Err(ProtocolError::MalformedPayload(_))
+        ));
+    }
+
+    #[test]
+    fn validate_filter_accepts_plus_at_any_level() {
+        assert!(validate_topic_filter("sport/+/player1").is_ok());
+        assert!(validate_topic_filter("+/+").is_ok());
+        assert!(validate_topic_filter("+").is_ok());
+    }
+
+    #[test]
+    fn validate_filter_rejects_plus_not_alone_in_level() {
+        assert!(matches!(
+            validate_topic_filter("sport/+aa/player1"),
+            Err(ProtocolError::MalformedPayload(_))
+        ));
+    }
+
+    #[test]
+    fn validate_filter_rejects_empty_filter() {
+        assert!(matches!(
+            validate_topic_filter(""),
+            Err(ProtocolError::MalformedPayload(_))
+        ));
+    }
+
+    #[test]
+    fn matches_exact_topic() {
+        assert!(topic_matches_filter("sport/tennis/player1", "sport/tennis/player1"));
+        assert!(!topic_matches_filter("sport/tennis/player1", "sport/tennis/player2"));
+    }
+
+    #[test]
+    fn matches_multi_level_wildcard() {
+        assert!(topic_matches_filter("sport/tennis/player1", "sport/tennis/player1/#"));
+        assert!(topic_matches_filter(
+            "sport/tennis/player1/ranking",
+            "sport/tennis/player1/#"
+        ));
+        assert!(topic_matches_filter("sport", "sport/#"));
+        assert!(topic_matches_filter("sport/anything/at/all", "sport/#"));
+        assert!(topic_matches_filter("anything", "#"));
+    }
+
+    #[test]
+    fn matches_single_level_wildcard() {
+        assert!(topic_matches_filter("sport/tennis/player1", "sport/+/player1"));
+        assert!(topic_matches_filter("sport/hockey/player1", "sport/+/player1"));
+        // '+' matches exactly one level — must not also swallow a
+        // deeper level.
+        assert!(!topic_matches_filter(
+            "sport/tennis/junior/player1",
+            "sport/+/player1"
+        ));
+    }
+
+    #[test]
+    fn matches_plus_does_not_match_missing_level() {
+        // "sport/+" requires a second level to exist; "sport" alone
+        // must not match.
+        assert!(!topic_matches_filter("sport", "sport/+"));
+    }
+
+    #[test]
+    fn matches_leading_slash_topics() {
+        // "+/+" matches "/finance" (an empty first level, per the
+        // spec's own worked example in §4.7.1.3).
+        assert!(topic_matches_filter("/finance", "+/+"));
+    }
+
+    #[test]
+    fn matches_never_panics_on_adversarial_slash_counts() {
+        // Regression-style guard: matching must stay well-behaved even
+        // on a topic/filter with a large number of levels, since both
+        // strings are attacker-influenced (arrive over the wire).
+        let many_slashes = "a/".repeat(10_000);
+        assert!(!topic_matches_filter(&many_slashes, "x/y/z"));
+        assert!(topic_matches_filter(&many_slashes, "#"));
+    }
+
+    #[test]
+    fn subscribe_rejects_invalid_wildcard_filter() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes());
+        encode_utf8_string("sport/tennis#", &mut body); // invalid: # not alone
+        body.push(0);
+        let bytes = prepend_fixed_header(PT_SUBSCRIBE, 0b0010, body);
+        assert!(matches!(decode(&bytes), Err(ProtocolError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn subscribe_accepts_valid_wildcard_filter() {
+        let original = MqttPacket::Subscribe(SubscribePacket {
+            packet_id: 1,
+            subscriptions: vec![("sport/+/player1".to_string(), 0)],
+        });
+        let bytes = encode(&original);
+        assert!(decode(&bytes).is_ok());
     }
 
     // --- Buffering behavior connection.rs relies on ---
