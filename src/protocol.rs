@@ -1139,4 +1139,74 @@ mod tests {
         let (_, consumed2) = decode(&buf[consumed..]).unwrap();
         assert_eq!(consumed2, second.len());
     }
+
+    // --- Role C: packet-parsing edge cases (overflow guard, large payload) ---
+
+    #[test]
+    fn decode_max_remaining_length_never_panics() {
+        // Exercises the `header_len.checked_add(remaining_len as usize)`
+        // guard in decode() (§2.2.3 / AI_GUARDRAILS.md rule 3).
+        //
+        // The MQTT 3.1.1 spec max remaining length is 268,435,455, encoded
+        // as four bytes [0xFF, 0xFF, 0xFF, 0x7F] (§2.2.3 Table 2.4).  We
+        // supply only a 5-byte buffer (1 fixed-header byte + 4 RL bytes,
+        // no payload), so decode() must return an Err without panicking.
+        //
+        // Platform note: on 64-bit hosts `remaining_len as usize`
+        // (268,435,455) + `header_len` (5) = 268,435,460, which is well
+        // within usize range, so the overflow branch itself is not
+        // reachable on this target.  The checked_add succeeds and the
+        // function returns Err(ProtocolError::Incomplete) because
+        // buf.len() < total_len.  The intent of this test is to confirm
+        // that the code path runs to completion and returns an Err —
+        // never panics — regardless of which Err variant is produced.
+        // On a hypothetical 16-bit target the overflow branch would be
+        // reached instead, returning MalformedPayload; the is_err()
+        // assertion covers both outcomes.  See Personal_Decisions.md for
+        // the full judgment-call record.
+        let buf: [u8; 5] = [
+            PT_PUBLISH << 4,  // packet type: PUBLISH, flags 0 (QoS 0)
+            0xFF,             // remaining length byte 1: continuation set
+            0xFF,             // remaining length byte 2: continuation set
+            0xFF,             // remaining length byte 3: continuation set
+            0x7F,             // remaining length byte 4: no continuation, value = 268,435,455
+        ];
+        // Must return an Err — never panic, never index out of bounds.
+        assert!(decode(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_large_publish_payload_roundtrip() {
+        // Confirms that a well-formed but large PUBLISH payload (1 MiB)
+        // decodes correctly and that the round-trip is byte-exact
+        // (AI_GUARDRAILS.md rule 3: no panic on oversized-but-valid input).
+        //
+        // Topic: "load/test" (9 bytes); payload: 1,048,576 bytes, all 0xAB.
+        // Resulting remaining length = 2 + 9 + 1,048,576 = 1,048,587,
+        // which encodes as 4 MQTT RL bytes (§2.2.3), well within the
+        // spec max of 268,435,455.
+        let topic = "load/test";
+        let payload: Vec<u8> = vec![0xAB; 1024 * 1024]; // 1 MiB
+        let original = MqttPacket::Publish(PublishPacket {
+            topic: topic.to_string(),
+            payload: payload.clone(),
+            qos: 0,
+            retain: false,
+            packet_id: None,
+        });
+        let bytes = encode(&original);
+        let (decoded, consumed) = decode(&bytes).expect("large PUBLISH must decode without error");
+        assert_eq!(consumed, bytes.len(), "consumed must equal the full encoded length");
+        match decoded {
+            MqttPacket::Publish(p) => {
+                assert_eq!(p.topic, topic);
+                assert_eq!(p.payload.len(), payload.len(), "payload length must be preserved");
+                assert_eq!(p.payload, payload, "payload bytes must be preserved exactly");
+                assert_eq!(p.qos, 0);
+                assert!(!p.retain);
+                assert_eq!(p.packet_id, None);
+            }
+            _ => panic!("expected Publish"),
+        }
+    }
 }

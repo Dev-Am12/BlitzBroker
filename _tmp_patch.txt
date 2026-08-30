@@ -1,0 +1,2 @@
+﻿
+- [x] Unit tests: packet parsing edge cases (truncated, invalid remaining-length, oversized payload)

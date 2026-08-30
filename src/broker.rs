@@ -231,4 +231,65 @@ mod tests {
         drop(tx);
         broker.join().unwrap();
     }
+
+    #[test]
+    fn disconnect_removes_subscriptions_across_multiple_topics() {
+        // Regression guard: the Disconnect handler iterates over *all*
+        // topic lists to remove the client (broker.rs `for subs in
+        // topics.values_mut()`). This test verifies that a client
+        // subscribed to three distinct topics receives nothing on any of
+        // them after disconnecting — the single-topic case in
+        // disconnect_removes_all_subscriptions does not exercise the
+        // multi-entry iteration path.
+        let (tx, rx) = mpsc::channel();
+        let broker = thread::spawn(move || run_broker(rx));
+
+        let out_a = crate::queue::new::<OutboundEvent>(4);
+        tx.send(BrokerMessage::Register {
+            id: 10,
+            client_id: "multi-sub-client".into(),
+            outbound: out_a.clone(),
+        })
+        .unwrap();
+
+        // Subscribe to three separate topics so the Disconnect handler
+        // must clean up all three registry entries, not just the first.
+        for topic in ["alpha", "beta", "gamma"] {
+            tx.send(BrokerMessage::Subscribe {
+                id: 10,
+                topic: topic.into(),
+            })
+            .unwrap();
+        }
+
+        tx.send(BrokerMessage::Disconnect { id: 10 }).unwrap();
+
+        // Publish to every topic the client was subscribed to — none
+        // should be delivered after disconnect.
+        for topic in ["alpha", "beta", "gamma"] {
+            tx.send(BrokerMessage::Publish {
+                from: 99,
+                packet: PublishPacket {
+                    topic: topic.into(),
+                    payload: b"should-not-arrive".to_vec(),
+                    qos: 0,
+                    retain: false,
+                    packet_id: None,
+                },
+            })
+            .unwrap();
+        }
+
+        // drop(tx) before close so the broker thread exits cleanly, then
+        // close the queue so pop_blocking() unblocks rather than waiting
+        // forever for a message that will never come.
+        drop(tx);
+        broker.join().unwrap();
+
+        out_a.close();
+        assert!(
+            out_a.pop_blocking().is_none(),
+            "disconnected client must not receive publishes on any of its former topics"
+        );
+    }
 }
