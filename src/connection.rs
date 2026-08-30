@@ -153,6 +153,25 @@ fn dispatch_packet(
             });
             true
         }
+        MqttPacket::PubAck(ack) => {
+            // ROLE B ADDED THIS ARM — flagging for Role A review, not
+            // claiming ownership of connection.rs. Needed because
+            // adding MqttPacket::PubAck (PLAN.md §4 item 2 / QoS 1)
+            // made the match here non-exhaustive, which broke the
+            // build; a correct-but-minimal arm was required to keep
+            // `cargo build` green rather than leaving it broken.
+            //
+            // What this does: a client sends PUBACK to ack a QoS 1
+            // PUBLISH the broker delivered *to* it. There's currently
+            // no per-subscriber "pending ack" bookkeeping in
+            // broker.rs, so there's nothing to clear yet — this is
+            // therefore a correct no-op, not a stub. Once/if broker.rs
+            // tracks in-flight QoS 1 deliveries, this is the extension
+            // point: forward `ack.packet_id` (and `id`, the connection
+            // it came from) to the broker so it can clear that entry.
+            let _ = ack;
+            true
+        }
         MqttPacket::PingReq => {
             // Ping/pong is connection-local — no need to involve the
             // broker thread for it.

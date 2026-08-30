@@ -14,8 +14,8 @@ Fixed/variable header parsing, remaining-length encoding/decoding, all packet-ty
 - [x] PUBLISH (QoS 0)
 - [x] PINGREQ / PINGRESP, DISCONNECT
 - [x] Malformed/truncated/oversized-input rejection paths for every packet type (cite spec section for each)
-- [x] (stretch) Topic wildcards (+, #) — validation + matching predicate done; broker fan-out integration is a Role A step, see DECISIONS.md #9
-- [ ] (stretch) QoS 1 (PUBACK)
+- [x] (stretch) Topic wildcards (+, #) — validation + matching predicate done; broker fan-out integration is a Role A step, see DECISIONS.md #8
+- [x] (stretch) QoS 1 (PUBACK) — ack round-trip done; broker-side redelivery/pending-ack tracking out of scope, see DECISIONS.md #9
 
 ## Log
 _Add dated entries below as you go — what you did, decisions made, blockers hit._
@@ -44,3 +44,20 @@ Implemented `decode()`/`encode()` and all the per-packet-type functions in `prot
 **Blockers:** none. Working on branch `role-b/protocol-parsing`, not pushed to `main` directly — connection.rs (Role A) depends on these exact function signatures, didn't want to hand anyone a half-working intermediate state.
 
 **Next up:** stretch items (wildcards, QoS 1) only after Role C's edge-case/interop test pass confirms core is solid, per PLAN.md §4 priority order.
+
+### 2026-08-30 (later)
+
+Implemented QoS 1 / PUBACK (PLAN.md §4 item 2):
+- New `PubAckPacket` struct + `MqttPacket::PubAck` variant, `PT_PUBACK` constant.
+- `decode_publish`/`encode_publish` extended to accept QoS 1 — packet identifier now required and parsed when `qos != 0`, validated non-zero per §2.3.1. QoS 2 still correctly rejected as `UnsupportedFeature` (only QoS 0/1 in scope).
+- New `decode_puback`/`encode_puback`, with fixed-header-flags-must-be-zero validation (§3.4.1) and exactly-2-byte body validation (§3.4.2).
+- `decode()`'s dispatch now accepts `PUBACK` as a legitimate packet *from* the client (unlike SUBACK/CONNACK/UNSUBACK/PINGRESP, which stay client→broker-illegal) — a client sends PUBACK to acknowledge a QoS 1 message the broker delivered to it.
+- 12 new tests: QoS1 PUBLISH roundtrip, truncated/zero packet-id rejection, PUBACK roundtrip, wrong-body-length rejection, zero-packet-id rejection, nonzero-flags rejection. Updated two now-outdated tests (`publish_rejects_qos1_as_unsupported_in_core_scope` → replaced with actual QoS1 support tests; added a real QoS2-still-unsupported test in its place).
+
+**Scope decision (see DECISIONS.md #9):** implemented the ack round-trip only, not full at-least-once redelivery (no DUP retransmission, no retry timers, no per-subscriber pending-ack tracking). PLAN.md §4 item 2 just says "QoS 1 (PUBACK)" — full redelivery semantics would be a much bigger broker-state undertaking than the remaining time budget supports honestly.
+
+**Cross-file note:** adding the `PubAck` enum variant broke `connection.rs`'s exhaustive match (Role A's file) — had to add one minimal, clearly-commented arm there to keep `cargo build` passing. Flagged explicitly with a `// ROLE B ADDED THIS ARM` comment for their review; didn't restructure anything else in that file. This is a correct no-op (nothing to ack-track yet), not a stub.
+
+**Status:** 62/62 tests passing, clean `cargo build` and `cargo build --release`.
+
+**Not yet done:** broker→subscriber QoS1 delivery still doesn't track pending acks — that's real broker-state work belonging to `broker.rs` (Role A), left as an integration point, same pattern as wildcard fan-out.
