@@ -230,7 +230,7 @@ fn writer_loop(mut stream: TcpStream, outbound: queue::QueueHandle<OutboundEvent
 mod tests {
     use super::*;
     use crate::broker::{BrokerMessage, OutboundEvent, DEFAULT_CLIENT_QUEUE_CAPACITY};
-    use crate::protocol::{MqttPacket, SubscribePacket, UnsubscribePacket};
+    use crate::protocol::{MqttPacket, PublishPacket, SubscribePacket, UnsubscribePacket};
     use std::sync::mpsc;
 
     /// Pop the next outbound packet from the queue. The queue must be
@@ -435,5 +435,124 @@ mod tests {
             outbound.pop_blocking().is_none(),
             "only one UNSUBACK must be queued for a single UNSUBSCRIBE"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // PUBLISH (QoS 1) → PUBACK   (MQTT 3.1.1 §3.3.4)
+    //
+    // Regression tests for the bug Role A caught via a live
+    // `mosquitto_pub -q 1` run hanging against the real binary: the
+    // broker never sent a PUBACK back to a QoS 1 publisher. The earlier
+    // protocol.rs encode/decode tests for QoS 1 couldn't have caught
+    // this — they only prove PUBACK's *wire format* is correct, not
+    // that the broker's dispatch logic actually sends one. These tests
+    // exercise dispatch_packet directly (no real socket needed, same
+    // pattern as the SUBSCRIBE/UNSUBSCRIBE tests above) so this
+    // specific class of bug can't silently regress again.
+    // -----------------------------------------------------------------------
+
+    /// A QoS 1 PUBLISH must produce a PUBACK on the *publishing*
+    /// client's own outbound queue, echoing that PUBLISH's packet_id
+    /// (§3.3.4) — this is the exact scenario that was broken.
+    #[test]
+    fn publish_qos1_produces_puback_with_matching_packet_id() {
+        let (tx, rx) = mpsc::channel::<BrokerMessage>();
+        let outbound = queue::new(DEFAULT_CLIENT_QUEUE_CAPACITY);
+
+        let publish = PublishPacket {
+            topic: "sensors/temp".to_string(),
+            payload: b"21C".to_vec(),
+            qos: 1,
+            retain: false,
+            packet_id: Some(42),
+        };
+        let result = dispatch_packet(1, MqttPacket::Publish(publish), &tx, &outbound);
+
+        assert!(result, "dispatch_packet must return true for PUBLISH");
+
+        // Broker must still receive the Publish message for fan-out —
+        // the ack fix must not have replaced that forwarding.
+        let msg = rx.try_recv().expect("broker should have received BrokerMessage::Publish");
+        match msg {
+            BrokerMessage::Publish { from: _, packet } => {
+                assert_eq!(packet.topic, "sensors/temp");
+                assert_eq!(packet.qos, 1);
+            }
+            _ => panic!("expected BrokerMessage::Publish"),
+        }
+        assert!(rx.try_recv().is_err(), "only one BrokerMessage::Publish expected");
+
+        outbound.close();
+        match pop_packet(&outbound) {
+            MqttPacket::PubAck(ack) => {
+                assert_eq!(
+                    ack.packet_id, 42,
+                    "PUBACK packet_id must match the PUBLISH's packet_id (§3.3.4)"
+                );
+            }
+            other => panic!("expected PubAck on the publishing client's own queue, got {:?}", other),
+        }
+        // Exactly one packet queued — no duplicate acks.
+        assert!(
+            outbound.pop_blocking().is_none(),
+            "only one PUBACK must be queued for a single QoS 1 PUBLISH"
+        );
+    }
+
+    /// A QoS 0 PUBLISH must NOT produce any PUBACK (§3.3.4 — acks only
+    /// apply to QoS > 0). Guards against a naive fix that acks
+    /// unconditionally regardless of QoS.
+    #[test]
+    fn publish_qos0_produces_no_puback() {
+        let (tx, rx) = mpsc::channel::<BrokerMessage>();
+        let outbound = queue::new(DEFAULT_CLIENT_QUEUE_CAPACITY);
+
+        let publish = PublishPacket {
+            topic: "sensors/temp".to_string(),
+            payload: b"21C".to_vec(),
+            qos: 0,
+            retain: false,
+            packet_id: None,
+        };
+        let result = dispatch_packet(1, MqttPacket::Publish(publish), &tx, &outbound);
+
+        assert!(result, "dispatch_packet must return true for PUBLISH");
+        assert!(rx.try_recv().is_ok(), "broker should still receive BrokerMessage::Publish for QoS 0");
+
+        outbound.close();
+        assert!(
+            outbound.pop_blocking().is_none(),
+            "QoS 0 PUBLISH must not produce any outbound packet (no PUBACK for QoS 0, §3.3.4)"
+        );
+    }
+
+    /// Two QoS 1 PUBLISHes with different packet identifiers on the
+    /// same connection must each get their own correctly-matched
+    /// PUBACK, in order — guards against a fix that hardcodes or
+    /// reuses a single packet_id.
+    #[test]
+    fn multiple_qos1_publishes_each_get_correctly_matched_puback() {
+        let (tx, _rx) = mpsc::channel::<BrokerMessage>();
+        let outbound = queue::new(DEFAULT_CLIENT_QUEUE_CAPACITY);
+
+        for pid in [1u16, 2, 3] {
+            let publish = PublishPacket {
+                topic: "t".to_string(),
+                payload: vec![],
+                qos: 1,
+                retain: false,
+                packet_id: Some(pid),
+            };
+            dispatch_packet(1, MqttPacket::Publish(publish), &tx, &outbound);
+        }
+
+        outbound.close();
+        for expected_pid in [1u16, 2, 3] {
+            match pop_packet(&outbound) {
+                MqttPacket::PubAck(ack) => assert_eq!(ack.packet_id, expected_pid),
+                other => panic!("expected PubAck({expected_pid}), got {:?}", other),
+            }
+        }
+        assert!(outbound.pop_blocking().is_none(), "no extra packets expected");
     }
 }

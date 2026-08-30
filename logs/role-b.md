@@ -73,3 +73,14 @@ Role A reviewed the QoS1 work and ran a live `mosquitto_pub -q 1` test against t
 Full test suite re-run: still 62/62 passing (no regressions from the fix).
 
 **Takeaway logged in DECISIONS.md #9:** encode/decode unit tests prove wire format, not broker behavior — anything claimed as an end-to-end "round-trip" needs a real client check (mosquitto/paho-mqtt), not just protocol-level tests, before being logged as done.
+
+### 2026-08-30 (regression tests for the PUBACK bugfix)
+
+Added 3 tests to `connection.rs`'s existing test module (same pattern as Role A's SUBACK/UNSUBACK tests — calling `dispatch_packet` directly with a real `mpsc` channel and a real `queue::QueueHandle`, no socket needed):
+- `publish_qos1_produces_puback_with_matching_packet_id` — the core regression case: QoS 1 PUBLISH must produce exactly one PUBACK on the *publishing* client's own outbound queue, echoing its packet_id, and the broker must still receive the message for fan-out.
+- `publish_qos0_produces_no_puback` — guards against a naive fix that acks unconditionally regardless of QoS.
+- `multiple_qos1_publishes_each_get_correctly_matched_puback` — guards against a fix that hardcodes or reuses a single packet_id across multiple PUBLISHes.
+
+**Proved these actually catch the bug, not just that they pass:** temporarily reverted the `connection.rs` fix back to the pre-fix code, reran `publish_qos1_produces_puback_with_matching_packet_id`, confirmed it fails (panics on the empty outbound queue) exactly as expected. Restored the fix, reran the full suite — back to green. This is the same lesson from the bug itself: don't just trust that a test passes, prove it would have failed without the fix.
+
+**Status:** 65/65 tests passing (62 + 3 new), clean `cargo build` and `cargo build --release`.
