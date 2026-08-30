@@ -11,6 +11,8 @@ Every load-bearing technical or architectural decision made during this build, i
 - [5. Topic wildcard matching: implemented in the protocol layer, not yet wired into the broker](#5-topic-wildcard-matching-implemented-in-the-protocol-layer-not-yet-wired-into-the-broker)
 - [6. QoS 1 (PUBACK): parsing + client→broker ack round-trip done; broker→subscriber redelivery/pending-ack tracking is out of scope](#6-qos-1-puback-parsing--clientbroker-ack-round-trip-done-brokersubscriber-redeliverypending-ack-tracking-is-out-of-scope)
 - [7. Correction to #6: the broker→client ack direction was missing, found via live verification, now fixed](#7-correction-to-6-the-brokerclient-ack-direction-was-missing-found-via-live-verification-now-fixed)
+- [8. Sharded broker: topic registry split into N independent single-threaded shards](#8-sharded-broker-topic-registry-split-into-n-independent-single-threaded-shards)
+- [9. Correction to #5: wildcard fan-out is now wired in, and required extending #8's shard-broadcast treatment to wildcard subscriptions](#9-correction-to-5-wildcard-fan-out-is-now-wired-in-and-required-extending-8s-shard-broadcast-treatment-to-wildcard-subscriptions)
 
 ---
 
@@ -91,3 +93,23 @@ Every load-bearing technical or architectural decision made during this build, i
 **Lesson for how this repo verifies things going forward:** encode/decode unit tests prove the wire format is correct in isolation; they do not prove the broker *behaves* correctly end-to-end. Anything claimed as a working "round-trip" or "flow" should be checked against a real client (mosquitto/paho-mqtt) before being logged as done, not just unit-tested.
 
 **In plain terms:** Entry #6 was half-right — a client publishing at QoS 1 now actually gets acknowledged, verified against a real MQTT client, not just our own tests. What's still missing, same as noted in #6: when the broker forwards a QoS 1 message on to a subscriber, it doesn't yet track whether that subscriber acknowledged it or retry if they didn't.
+
+---
+
+## 8. Sharded broker: topic registry split into N independent single-threaded shards
+
+**Decision:** Replace the single broker actor thread with `NUM_BROKER_SHARDS` (default 4) independent shards, each running the existing `run_broker` loop unmodified over a disjoint subset of topics. A `ShardedBroker` router sits in front: `Subscribe`/`Unsubscribe`/`Publish` for exact-match filters route to exactly one shard, chosen by hashing the topic string (`shard_for_topic`, `std::collections::hash_map::DefaultHasher`, no crate). `Register` and `Disconnect` broadcast to every shard, since a single client may end up with subscriptions spread across more than one.
+
+**Rationale:** This extends #1's design rather than replacing it — each shard is still a single-threaded actor with exclusive ownership of its slice of the registry, so the "no data races, ordering preserved by construction" guarantee from #1 still holds, just per-shard instead of globally. The broadcast treatment for Register/Disconnect was the one real design fork: a shard has no way to know in advance whether a client will ever subscribe to one of its topics, so every shard needs to know about every client's existence and be able to clean up on disconnect regardless. This redundancy (every shard's `clients` map holding every connected client) is intentional and cheap at this project's scale, not a workaround. Existing single-broker tests were kept passing unmodified by keeping `run_broker`'s internal logic untouched and by having `connection.rs`'s `dispatch_packet` accept the send operation through a `BrokerSend` trait, implemented for both a bare `Sender<BrokerMessage>` (what the existing unit tests use) and `ShardedBroker` (what production uses) — so the sharding change didn't require rewriting the connection-level test suite.
+
+**In plain terms:** Instead of one thread handling every topic, there are now several threads, each responsible for its own slice of topics, chosen by hashing the topic name. Messages that don't have a topic (a client connecting or disconnecting) get told to all of them, since any shard might end up needing to know about that client later.
+
+---
+
+## 9. Correction to #5: wildcard fan-out is now wired in, and required extending #8's shard-broadcast treatment to wildcard subscriptions
+
+**Decision:** Wire `topic_matches_filter` into `run_broker`'s `Publish` handling (a wildcard pass alongside the existing exact-match fast path, with de-duplication so a client subscribed both ways doesn't receive a message twice). Additionally — because of #8's sharded design, which didn't exist yet when #5 was written — change `ShardedBroker`'s `Subscribe`/`Unsubscribe` routing so that a wildcard filter (containing `+` or `#`) broadcasts to all shards, the same treatment Register/Disconnect already get, rather than routing by hash like an exact-match filter does.
+
+**Rationale:** #5 correctly identified that `broker.rs` never consulted wildcard filters at all. What #5 didn't anticipate, because sharding didn't exist yet, is that hash-routing a wildcard filter string is itself wrong: `"sensors/+/temp"` and a matching concrete publish like `"sensors/kitchen/temp"` are different strings that generally hash to different shards, so even after wiring in the matching function, a single shard's Publish handler would usually not have the relevant wildcard subscription available to check against. Both halves of the fix were necessary together. Verified independently (not just by the automated suite that was written alongside this fix): three different `+`-filter/topic pairs and one `#`-filter case, deliberately varied to increase the odds of landing on different shards, all delivered correctly through the live broker with real mosquitto clients; a non-matching case correctly delivered nothing.
+
+**In plain terms:** #5 found the first half of the bug (the broker wasn't checking wildcards at all). Fixing it exposed a second half that only existed because of the sharding work in #8 — a wildcard subscription and the message that should match it can easily end up on different shards, so wildcard subscriptions now get told to every shard instead of just one. Tested with real MQTT clients, deliberately across several different topic names to make sure it wasn't just getting lucky on one shard.
