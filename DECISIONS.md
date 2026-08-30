@@ -95,3 +95,17 @@ Every load-bearing technical or architectural decision made during this build, i
 **Not yet done, verified by a live test rather than assumed:** `broker.rs`'s registry still performs exact-string topic lookup (`HashMap<String, Vec<ConnectionId>>`). A live test — subscribing with `sensors/+/temp` and publishing to `sensors/kitchen/temp` via real mosquitto clients — confirmed the wildcard subscriber currently receives nothing. Swapping the registry's fan-out to use `topic_matches_filter` instead of exact match is the remaining integration step.
 
 **In plain terms:** The code that understands wildcard subscriptions (like `sensors/+/temp`) is written and tested on its own, but the broker's actual message-routing logic doesn't call it yet — so wildcard subscriptions don't work end-to-end yet, confirmed by actually trying it, not just by reading the code.
+
+---
+
+## 9. QoS 1 (PUBACK): parsing + client→broker ack round-trip done; broker→subscriber redelivery/pending-ack tracking is out of scope
+
+**Decision:** Implement `PUBACK` encode/decode and extend `PUBLISH` parsing to accept QoS 1 (packet identifier required, validated non-zero per §2.3.1). Scope this narrowly to "the ack round-trip itself" — not full at-least-once delivery semantics (no DUP-flag redelivery, no broker-side retry-on-timeout, no per-subscriber pending-ack bookkeeping).
+
+**Rationale:** PLAN.md §4 item 2 names the extra scope as "QoS 1 (PUBACK)" without specifying full redelivery guarantees, and implementing genuine at-least-once semantics (tracking in-flight deliveries per subscriber, retry timers, DUP handling) is materially more broker-state-machine work than the remaining hackathon time budget supports well. The ack round-trip itself — a client can publish at QoS 1 and receive a real PUBACK acknowledging it — is the meaningfully-scoped, honestly-doable version of this stretch item.
+
+**Breaking-change note:** adding `MqttPacket::PubAck` made `connection.rs`'s exhaustive `match` on `MqttPacket` fail to compile. A minimal, clearly-commented arm was added there (by Role B, flagged for Role A review — see the `// ROLE B ADDED THIS ARM` comment in `connection.rs`) purely to keep the build green: it treats a received PUBACK as a correct no-op, since there's no pending-ack state anywhere yet to clear.
+
+**Not yet done:** the *other* direction — the broker publishing a QoS 1 message *to* a subscriber and expecting a PUBACK back from them — needs per-subscriber pending-delivery tracking in `broker.rs`'s fan-out logic. That's a real broker-state addition, not a parsing one, and is left as a Role A integration point, same pattern as wildcard fan-out (#8).
+
+**In plain terms:** A client can now publish a QoS 1 message and get a real ack back — that round-trip works and is tested. What's still missing: when the broker forwards a QoS 1 message on to a subscriber, it doesn't yet track whether that subscriber acknowledged it or retry if they didn't.

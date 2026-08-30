@@ -23,6 +23,7 @@ pub enum MqttPacket {
     Unsubscribe(UnsubscribePacket),
     UnsubAck(UnsubAckPacket),
     Publish(PublishPacket),
+    PubAck(PubAckPacket),
     PingReq,
     PingResp,
     Disconnect,
@@ -91,7 +92,8 @@ pub struct UnsubAckPacket {
 
 /// MQTT 3.1.1 §3.3 PUBLISH. Core scope: QoS 0 only (`qos` is always 0,
 /// `packet_id` is always `None` — a QoS 0 PUBLISH has no packet
-/// identifier per spec).
+/// identifier per spec). Extra scope (PLAN.md §4 item 2): `qos == 1`
+/// is also accepted, in which case `packet_id` is `Some`.
 #[derive(Debug, Clone)]
 pub struct PublishPacket {
     pub topic: String,
@@ -101,10 +103,19 @@ pub struct PublishPacket {
     pub packet_id: Option<u16>,
 }
 
+/// MQTT 3.1.1 §3.4 PUBACK — extra scope (PLAN.md §4 item 2). Sent to
+/// acknowledge receipt of a QoS 1 PUBLISH. Fixed format: just echoes
+/// the Packet Identifier of the PUBLISH being acknowledged.
+#[derive(Debug, Clone)]
+pub struct PubAckPacket {
+    pub packet_id: u16,
+}
+
 // --- Packet type nibble values, MQTT 3.1.1 §2.2.1 Table 2.1 ---
 const PT_CONNECT: u8 = 1;
 const PT_CONNACK: u8 = 2;
 const PT_PUBLISH: u8 = 3;
+const PT_PUBACK: u8 = 4;
 const PT_SUBSCRIBE: u8 = 8;
 const PT_SUBACK: u8 = 9;
 const PT_UNSUBSCRIBE: u8 = 10;
@@ -153,6 +164,18 @@ pub fn decode(buf: &[u8]) -> Result<(MqttPacket, usize), ProtocolError> {
         PT_SUBSCRIBE => MqttPacket::Subscribe(decode_subscribe(body)?),
         PT_UNSUBSCRIBE => MqttPacket::Unsubscribe(decode_unsubscribe(body)?),
         PT_PUBLISH => MqttPacket::Publish(decode_publish(flags, body)?),
+        PT_PUBACK => {
+            // Unlike SUBACK/CONNACK/UNSUBACK/PINGRESP, a client
+            // legitimately *sends* PUBACK to the broker — it's
+            // acknowledging a QoS 1 PUBLISH the broker delivered to
+            // that client, so this direction is decoded, not rejected.
+            if flags != 0 {
+                return Err(ProtocolError::MalformedPayload(
+                    "PUBACK fixed header flags are reserved and must be 0 (§3.4.1)",
+                ));
+            }
+            MqttPacket::PubAck(decode_puback(body)?)
+        }
         PT_PINGREQ => {
             if !body.is_empty() {
                 return Err(ProtocolError::MalformedPayload(
@@ -190,6 +213,7 @@ pub fn encode(packet: &MqttPacket) -> Vec<u8> {
         MqttPacket::SubAck(p) => encode_suback(p),
         MqttPacket::UnsubAck(p) => encode_unsuback(p),
         MqttPacket::Publish(p) => encode_publish(p),
+        MqttPacket::PubAck(p) => encode_puback(p),
         MqttPacket::PingResp => encode_fixed_header_only(PT_PINGRESP),
         MqttPacket::PingReq => encode_fixed_header_only(PT_PINGREQ),
         MqttPacket::Disconnect => encode_fixed_header_only(PT_DISCONNECT),
@@ -583,7 +607,7 @@ fn encode_unsuback(p: &UnsubAckPacket) -> Vec<u8> {
     prepend_fixed_header(PT_UNSUBACK, 0, p.packet_id.to_be_bytes().to_vec())
 }
 
-// --- PUBLISH, §3.3 (QoS 0 only in core scope, PLAN.md §3) ---
+// --- PUBLISH, §3.3 (QoS 0 core scope, QoS 1 extra scope PLAN.md §4 item 2) ---
 
 fn decode_publish(flags: u8, body: &[u8]) -> Result<PublishPacket, ProtocolError> {
     let qos = (flags >> 1) & 0x03;
@@ -594,11 +618,11 @@ fn decode_publish(flags: u8, body: &[u8]) -> Result<PublishPacket, ProtocolError
             "PUBLISH QoS bits 11 is not a valid QoS value (§3.3.1.2)",
         ));
     }
-    if qos != 0 {
-        // Core scope is QoS 0 only (PLAN.md §3); QoS 1 is a named extra
-        // (§4 item 2), QoS 2 is explicitly out of scope entirely.
+    if qos == 2 {
+        // QoS 2 is explicitly out of scope entirely (PLAN.md §4 item 2
+        // only names QoS 1 as the extra).
         return Err(ProtocolError::UnsupportedFeature(
-            "PUBLISH QoS 1/2 not supported in core scope (PLAN.md §3)",
+            "PUBLISH QoS 2 not supported (PLAN.md §4 scopes only QoS 0/1)",
         ));
     }
 
@@ -615,12 +639,27 @@ fn decode_publish(flags: u8, body: &[u8]) -> Result<PublishPacket, ProtocolError
         ));
     }
 
-    // QoS 0 PUBLISH has no Packet Identifier field (§3.3.2.2) — already
-    // validated qos == 0 above.
-    let packet_id = None;
+    // Packet Identifier is present only for QoS > 0 (§3.3.2.2), and per
+    // §2.3.1 must be non-zero when present.
+    let packet_id = if qos == 0 {
+        None
+    } else {
+        if body.len() < pos + 2 {
+            return Err(ProtocolError::MalformedPayload(
+                "truncated PUBLISH packet identifier (§3.3.2.2)",
+            ));
+        }
+        let id = u16::from_be_bytes([body[pos], body[pos + 1]]);
+        pos += 2;
+        if id == 0 {
+            return Err(ProtocolError::MalformedPayload(
+                "PUBLISH packet identifier must be non-zero for QoS > 0 (§2.3.1)",
+            ));
+        }
+        Some(id)
+    };
 
     let payload = body[pos..].to_vec();
-    let _ = &mut pos; // pos is intentionally not advanced past payload
 
     Ok(PublishPacket {
         topic,
@@ -643,9 +682,32 @@ fn encode_publish(p: &PublishPacket) -> Vec<u8> {
     if p.retain {
         flags |= 0x01;
     }
-    // DUP flag intentionally always 0 on encode: this broker never
-    // retransmits (no QoS 1/2 in core scope, so DUP has no meaning).
+    // DUP flag intentionally always 0 on encode: this broker doesn't
+    // implement redelivery/retry, only the ack round-trip itself (see
+    // DECISIONS.md #10 for what "QoS 1" means in this codebase's
+    // scope), so DUP never applies.
     prepend_fixed_header(PT_PUBLISH, flags, body)
+}
+
+// --- PUBACK, §3.4 (extra scope, PLAN.md §4 item 2) ---
+
+fn decode_puback(body: &[u8]) -> Result<PubAckPacket, ProtocolError> {
+    if body.len() != 2 {
+        return Err(ProtocolError::MalformedPayload(
+            "PUBACK variable header must be exactly a 2-byte packet identifier (§3.4.2)",
+        ));
+    }
+    let packet_id = u16::from_be_bytes([body[0], body[1]]);
+    if packet_id == 0 {
+        return Err(ProtocolError::MalformedPayload(
+            "PUBACK packet identifier must be non-zero (§2.3.1)",
+        ));
+    }
+    Ok(PubAckPacket { packet_id })
+}
+
+fn encode_puback(p: &PubAckPacket) -> Vec<u8> {
+    prepend_fixed_header(PT_PUBACK, 0, p.packet_id.to_be_bytes().to_vec())
 }
 
 #[cfg(test)]
@@ -947,12 +1009,87 @@ mod tests {
     }
 
     #[test]
-    fn publish_rejects_qos1_as_unsupported_in_core_scope() {
+    fn publish_rejects_qos2_as_unsupported() {
         let mut body = Vec::new();
         encode_utf8_string("t", &mut body);
-        body.extend_from_slice(&1u16.to_be_bytes()); // packet id, if it were QoS1
-        let bytes = prepend_fixed_header(PT_PUBLISH, 0b0010, body); // QoS bits = 01
+        body.extend_from_slice(&1u16.to_be_bytes()); // packet id, if it were QoS2
+        let bytes = prepend_fixed_header(PT_PUBLISH, 0b0100, body); // QoS bits = 10
         assert!(matches!(decode(&bytes), Err(ProtocolError::UnsupportedFeature(_))));
+    }
+
+    #[test]
+    fn publish_qos1_roundtrip() {
+        let original = MqttPacket::Publish(PublishPacket {
+            topic: "weather".to_string(),
+            payload: b"rain".to_vec(),
+            qos: 1,
+            retain: false,
+            packet_id: Some(42),
+        });
+        let bytes = encode(&original);
+        let (decoded, consumed) = decode(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        match decoded {
+            MqttPacket::Publish(p) => {
+                assert_eq!(p.qos, 1);
+                assert_eq!(p.packet_id, Some(42));
+                assert_eq!(p.payload, b"rain");
+            }
+            _ => panic!("expected Publish"),
+        }
+    }
+
+    #[test]
+    fn publish_qos1_rejects_truncated_packet_identifier() {
+        let mut body = Vec::new();
+        encode_utf8_string("t", &mut body);
+        // Only 1 byte of what should be a 2-byte packet identifier.
+        body.push(0x00);
+        let bytes = prepend_fixed_header(PT_PUBLISH, 0b0010, body); // QoS bits = 01
+        assert!(matches!(decode(&bytes), Err(ProtocolError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn publish_qos1_rejects_zero_packet_identifier() {
+        let mut body = Vec::new();
+        encode_utf8_string("t", &mut body);
+        body.extend_from_slice(&0u16.to_be_bytes()); // packet id 0 — illegal
+        let bytes = prepend_fixed_header(PT_PUBLISH, 0b0010, body);
+        assert!(matches!(decode(&bytes), Err(ProtocolError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn puback_roundtrip() {
+        let original = MqttPacket::PubAck(PubAckPacket { packet_id: 99 });
+        let bytes = encode(&original);
+        let (decoded, consumed) = decode(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        match decoded {
+            MqttPacket::PubAck(p) => assert_eq!(p.packet_id, 99),
+            _ => panic!("expected PubAck"),
+        }
+    }
+
+    #[test]
+    fn puback_rejects_wrong_body_length() {
+        // 3 bytes instead of the required exactly-2.
+        let bytes = prepend_fixed_header(PT_PUBACK, 0, vec![0x00, 0x01, 0x02]);
+        assert!(matches!(decode(&bytes), Err(ProtocolError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn puback_rejects_zero_packet_identifier() {
+        let bytes = prepend_fixed_header(PT_PUBACK, 0, 0u16.to_be_bytes().to_vec());
+        assert!(matches!(decode(&bytes), Err(ProtocolError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn puback_rejects_nonzero_flags() {
+        // Fixed header flags for PUBACK are reserved and must be 0
+        // (§3.4.1) — construct one with a nonzero flag nibble by hand.
+        let mut bytes = prepend_fixed_header(PT_PUBACK, 0, 2u16.to_be_bytes().to_vec());
+        bytes[0] |= 0b0001; // set a reserved flag bit
+        assert!(matches!(decode(&bytes), Err(ProtocolError::MalformedPayload(_))));
     }
 
     #[test]
