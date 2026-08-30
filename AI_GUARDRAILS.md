@@ -10,6 +10,7 @@ Rules for any coding agent (or human contributor) working on this project. If ge
 4. Packet-parsing code must be verifiable against the MQTT 3.1.1 specification section it implements. Do not rely on memorized or assumed wire-format details — check them against the spec text directly.
 5. Every generated change must be reviewed by a human before merging. Do not merge unreviewed output regardless of time pressure.
 6. Documentation must state only verified facts. Do not include performance, compliance, or interoperability claims in `README.md` or `STDLIB.md` that have not actually been run and confirmed.
+7. Report technical decisions. If completing a task requires choosing between multiple reasonable approaches — not just following the prompt's explicit instructions or an existing established pattern in the code — state what was chosen and why in the summary. This is for the team to review and decide whether it belongs in `DECISIONS.md`; do not edit `DECISIONS.md` directly. Routine choices already dictated by the prompt or by matching an existing pattern elsewhere in the codebase don't need flagging — only points where a real judgment call was made.
 
 ## Agent-usage discipline
 
@@ -23,4 +24,4 @@ Agent usage draws from a limited free-tier quota per contributor. To use it effi
 
 ## Definition of done
 
-A task is complete when: it builds, it has at least one test covering its primary failure mode, and — if it replaced something a third-party package would normally provide — `STDLIB.md` has a corresponding entry.
+A task is complete when: it builds, it has at least one test covering its primary failure mode, — if it replaced something a third-party package would normally provide — `STDLIB.md` has a corresponding entry, and — if it's tracked in a personal log (`logs/role-*.md`) — the corresponding task-queue checkbox is marked done and a brief dated log entry is added describing what was done.
