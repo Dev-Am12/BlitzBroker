@@ -12,8 +12,8 @@ use crate::broker::{
     next_connection_id, BrokerMessage, ConnectionId, OutboundEvent,
     DEFAULT_CLIENT_QUEUE_CAPACITY,
 };
-use crate::protocol::{self, ConnAckPacket, ConnectReturnCode, MqttPacket, SubAckPacket,
-    UnsubAckPacket};
+use crate::protocol::{self, ConnAckPacket, ConnectReturnCode, MqttPacket, PubAckPacket,
+    SubAckPacket, UnsubAckPacket};
 use crate::queue;
 
 /// Handle one accepted TCP connection for its entire lifetime. Blocks
@@ -147,6 +147,28 @@ fn dispatch_packet(
             true
         }
         MqttPacket::Publish(publish) => {
+            // MQTT 3.1.1 §3.3.4: when a client publishes at QoS 1, the
+            // broker MUST respond with PUBACK acknowledging that
+            // specific packet identifier — this was missing (Role A
+            // caught it via a live mosquitto_pub -q 1 test hanging on
+            // the ack). QoS 0 has no packet identifier and gets no
+            // ack, per spec. This ack is sent immediately/synchronously
+            // — it is not conditioned on the broker having found any
+            // subscribers or having completed fan-out; PUBACK
+            // acknowledges receipt by the broker, not delivery to
+            // anyone downstream (§3.3.4 makes no such promise either).
+            if publish.qos == 1 {
+                if let Some(packet_id) = publish.packet_id {
+                    outbound.push(OutboundEvent::Packet(MqttPacket::PubAck(PubAckPacket {
+                        packet_id,
+                    })));
+                }
+                // `publish.packet_id` is `None` here only if decode()
+                // let a malformed QoS-1 PUBLISH through, which it
+                // shouldn't (protocol.rs validates this) — silently
+                // skipping the ack rather than panicking is the safe
+                // fallback either way.
+            }
             let _ = broker_tx.send(BrokerMessage::Publish {
                 from: id,
                 packet: publish,

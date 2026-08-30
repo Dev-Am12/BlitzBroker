@@ -61,3 +61,15 @@ Implemented QoS 1 / PUBACK (PLAN.md §4 item 2):
 **Status:** 62/62 tests passing, clean `cargo build` and `cargo build --release`.
 
 **Not yet done:** broker→subscriber QoS1 delivery still doesn't track pending acks — that's real broker-state work belonging to `broker.rs` (Role A), left as an integration point, same pattern as wildcard fan-out.
+
+### 2026-08-30 (bugfix, found by Role A's review)
+
+Role A reviewed the QoS1 work and ran a live `mosquitto_pub -q 1` test against the actual built broker — it hung for the full timeout. Root cause: `connection.rs`'s `Publish` dispatch arm forwarded QoS1 messages to the broker channel but never sent the PUBACK back to the *publishing* client, which §3.3.4 requires. My earlier claim in this log and in DECISIONS.md #9 that "the ack round-trip is done and tested" was wrong for this direction — I'd only handled/tested the reverse case (client acking something the broker sent it, in the no-op `PubAck` arm) and every test I wrote was a `protocol.rs` encode/decode round-trip, which structurally cannot catch a missing connection-level behavior like this.
+
+**Fix:** `connection.rs`'s `Publish` arm now pushes a `PUBACK` (echoing the packet identifier) onto the outbound queue immediately when `publish.qos == 1`, before forwarding to the broker channel. QoS 0 unaffected (no ack, as spec'd).
+
+**Verified properly this time — live, not just unit tests:** installed `mosquitto-clients`, ran the exact repro Role A described (`mosquitto_pub -h 127.0.0.1 -p 1883 -q 1 -t test/qos1 -m hello -d`) against the compiled `release` binary. Confirmed it now completes immediately (`received PUBACK (Mid: 1, RC:0)` in the client's own debug log, exit code 0 — previously hung). Re-checked QoS 0 too, to make sure it still correctly gets no ack and doesn't hang either.
+
+Full test suite re-run: still 62/62 passing (no regressions from the fix).
+
+**Takeaway logged in DECISIONS.md #9:** encode/decode unit tests prove wire format, not broker behavior — anything claimed as an end-to-end "round-trip" needs a real client check (mosquitto/paho-mqtt), not just protocol-level tests, before being logged as done.
