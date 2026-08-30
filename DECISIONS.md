@@ -4,49 +4,17 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ## Table of Contents
 
-- [1. Language: Rust](#1-language-rust)
-- [2. Track: C — Web & Network](#2-track-c--web--network)
-- [3. Application: MQTT 3.1.1-subset pub/sub broker](#3-application-mqtt-311-subset-pubsub-broker)
-- [4. Concurrency model: single-threaded actor for the topic registry](#4-concurrency-model-single-threaded-actor-for-the-topic-registry)
-- [5. TLS / encrypted transport: out of scope](#5-tls--encrypted-transport-out-of-scope)
-- [6. Single File (+5) bonus: multi-file development, single-file merge attempted late](#6-single-file-5-bonus-multi-file-development-single-file-merge-attempted-late)
-- [7. Package Killer bonus target: `mqtt` / `aedes` (npm)](#7-package-killer-bonus-target-mqtt--aedes-npm)
-- [8. Topic wildcard matching: implemented in the protocol layer, not yet wired into the broker](#8-topic-wildcard-matching-implemented-in-the-protocol-layer-not-yet-wired-into-the-broker)
-- [9. Project name: BlitzBroker (restored entry)](#9-project-name-blitzbroker-restored-entry)
+- [1. Concurrency model: single-threaded actor for the topic registry](#1-concurrency-model-single-threaded-actor-for-the-topic-registry)
+- [2. TLS / encrypted transport: out of scope](#2-tls--encrypted-transport-out-of-scope)
+- [3. Single File (+5) bonus: multi-file development, single-file merge attempted late](#3-single-file-5-bonus-multi-file-development-single-file-merge-attempted-late)
+- [4. Package Killer bonus target: `mqtt` / `aedes` (npm)](#4-package-killer-bonus-target-mqtt--aedes-npm)
+- [5. Topic wildcard matching: implemented in the protocol layer, not yet wired into the broker](#5-topic-wildcard-matching-implemented-in-the-protocol-layer-not-yet-wired-into-the-broker)
+- [6. QoS 1 (PUBACK): parsing + client→broker ack round-trip done; broker→subscriber redelivery/pending-ack tracking is out of scope](#6-qos-1-puback-parsing--clientbroker-ack-round-trip-done-brokersubscriber-redeliverypending-ack-tracking-is-out-of-scope)
+- [7. Correction to #6: the broker→client ack direction was missing, found via live verification, now fixed](#7-correction-to-6-the-brokerclient-ack-direction-was-missing-found-via-live-verification-now-fixed)
 
 ---
 
-## 1. Language: Rust
-
-**Decision:** Rust, `std` only, zero third-party crates.
-
-**Rationale:** The team already had proven Rust experience from a prior hackathon (Port Mortem). More specifically for this event: Rust's standard library is unusually minimal in exactly the areas most projects lean on crates for — no async runtime, no JSON, no HTTP client/server, no crypto. That makes a genuinely zero-dependency build a meaningful engineering claim rather than a technicality — in most other languages (Node, Python, Java) the standard library already covers enough of a "Web & Network" project's needs that avoiding packages is a smaller lift. Alternatives considered: TypeScript/Node (full team fluency, lower execution risk, but a smaller distance travelled from normal practice) and C++ (comparable stdlib minimalism, but only half the team fluent, raising execution risk under a 72-hour clock).
-
-**In plain terms:** Rust's standard library gives us almost nothing for free in exactly the areas this event is testing, so building something real without any packages is a bigger, more honest flex here than in most other languages. We'd also already proven we could ship real Rust fast in a previous hackathon.
-
----
-
-## 2. Track: C — Web & Network
-
-**Decision:** Track C.
-
-**Rationale:** Best alignment with the team's existing web/backend project experience. Rust's biggest zero-dependency gap (no async runtime, no HTTP/networking crate ecosystem equivalent in `std`) is also most visible in exactly this track — the language's strongest flex and the track's subject matter point the same direction.
-
-**In plain terms:** Networking is where Rust without its usual crates looks most different from normal practice, and it's a track we already had relevant experience in.
-
----
-
-## 3. Application: MQTT 3.1.1-subset pub/sub broker
-
-**Decision:** Build a broker implementing a real, documented subset of MQTT 3.1.1, rather than a fully custom wire protocol.
-
-**Rationale:** A hand-designed protocol has no external ground truth — correctness can only be self-verified. Implementing a real published subset means genuine off-the-shelf MQTT clients (mosquitto, paho-mqtt) can interoperate with the broker directly, producing an external, provable correctness claim instead of an internal one. This mirrors the verification strategy that worked well in a previous hackathon: external, independently-checkable evidence over self-testing.
-
-**In plain terms:** Instead of inventing our own message format that only we can check, we implemented enough of the real MQTT standard that actual, independent MQTT tools can talk to our broker and prove it works — not just that we say it does.
-
----
-
-## 4. Concurrency model: single-threaded actor for the topic registry
+## 1. Concurrency model: single-threaded actor for the topic registry
 
 **Decision:** One broker thread exclusively owns the topic → subscriber registry; all other threads communicate with it only via `std::sync::mpsc` channels.
 
@@ -56,7 +24,7 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ---
 
-## 5. TLS / encrypted transport: out of scope
+## 2. TLS / encrypted transport: out of scope
 
 **Decision:** No TLS. Plaintext TCP only.
 
@@ -66,7 +34,7 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ---
 
-## 6. Single File (+5) bonus: multi-file development, single-file merge attempted late
+## 3. Single File (+5) bonus: multi-file development, single-file merge attempted late
 
 **Decision:** Development proceeds as a normal multi-file Cargo project using Rust's inline `mod {}` blocks for structure. A rehearsal merge into a single file is scheduled before the final hours to de-risk the mechanics ahead of the real submission merge.
 
@@ -76,7 +44,7 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ---
 
-## 7. Package Killer bonus target: `mqtt` / `aedes` (npm)
+## 4. Package Killer bonus target: `mqtt` / `aedes` (npm)
 
 **Decision:** Target the `mqtt`/`aedes` npm packages as the "package killed" claim for the bonus.
 
@@ -86,7 +54,7 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ---
 
-## 8. Topic wildcard matching: implemented in the protocol layer, not yet wired into the broker
+## 5. Topic wildcard matching: implemented in the protocol layer, not yet wired into the broker
 
 **Decision:** Topic-filter validation and the topic/filter matching predicate (`+` single-level, `#` multi-level wildcards, per MQTT 3.1.1 §4.7) live in `protocol.rs`, as pure functions separate from the broker's registry logic.
 
@@ -98,20 +66,28 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ---
 
-## 9. QoS 1 (PUBACK): parsing done; broker→client ack (§3.3.4) was missing on first pass, fixed and live-verified
+## 6. QoS 1 (PUBACK): parsing + client→broker ack round-trip done; broker→subscriber redelivery/pending-ack tracking is out of scope
 
 **Decision:** Implement `PUBACK` encode/decode and extend `PUBLISH` parsing to accept QoS 1 (packet identifier required, validated non-zero per §2.3.1). Scope this narrowly to "the ack round-trip itself" — not full at-least-once delivery semantics (no DUP-flag redelivery, no broker-side retry-on-timeout, no per-subscriber pending-ack bookkeeping).
 
 **Rationale:** PLAN.md §4 item 2 names the extra scope as "QoS 1 (PUBACK)" without specifying full redelivery guarantees, and implementing genuine at-least-once semantics (tracking in-flight deliveries per subscriber, retry timers, DUP handling) is materially more broker-state-machine work than the remaining hackathon time budget supports well. The ack round-trip itself — a client can publish at QoS 1 and receive a real PUBACK acknowledging it — is the meaningfully-scoped, honestly-doable version of this stretch item.
 
-**Correction (caught by Role A's live-verification pass, not by our test suite):** the first version of this work only handled the *client-acking-the-broker* direction (`connection.rs`'s `PubAck` no-op arm) and never made the broker itself send a PUBACK when a client publishes at QoS 1 — the direction §3.3.4 actually requires and the one that matters for a real publisher. All the tests added for this were `protocol.rs` encode/decode round-trips, which can't catch a connection-level behavior gap like this — nothing exercised `handle_connection`'s dispatch logic end-to-end. Role A caught it by running `mosquitto_pub -q 1` against the actual compiled binary and watching it hang for the full timeout. Fixed in `connection.rs`'s `Publish` arm: on receipt of a QoS 1 PUBLISH, the broker now immediately pushes a `PUBACK` (echoing the packet identifier) onto that connection's outbound queue before forwarding to the broker channel. Re-verified the same way Role A found it — `mosquitto_pub -q 1` against the running release binary now completes immediately with a logged `received PUBACK`; QoS 0 re-checked too, to confirm it still correctly gets no ack and doesn't hang either.
+**Breaking-change note:** adding `MqttPacket::PubAck` made `connection.rs`'s exhaustive `match` on `MqttPacket` fail to compile. A minimal, clearly-commented arm was added there (by Role B, flagged for Role A review — see the `// ROLE B ADDED THIS ARM` comment in `connection.rs`) purely to keep the build green: it treats a received PUBACK as a correct no-op, since there's no pending-ack state anywhere yet to clear.
+
+**Not yet done:** the *other* direction — the broker publishing a QoS 1 message *to* a subscriber and expecting a PUBACK back from them — needs per-subscriber pending-delivery tracking in `broker.rs`'s fan-out logic. That's a real broker-state addition, not a parsing one, and is left as a Role A integration point, same pattern as wildcard fan-out (#5).
+
+**In plain terms:** A client can now publish a QoS 1 message and get a real ack back — that round-trip works and is tested. What's still missing: when the broker forwards a QoS 1 message on to a subscriber, it doesn't yet track whether that subscriber acknowledged it or retry if they didn't.
+
+*(Note, added when #7 was logged: the claim above that the round-trip "works and is tested" turned out to be only half true — see #7. Left unedited here deliberately, per this document's own rule of not rewriting past entries; the correction is recorded as a new entry instead.)*
+
+---
+
+## 7. Correction to #6: the broker→client ack direction was missing, found via live verification, now fixed
+
+**Decision:** Fix `connection.rs`'s `Publish` dispatch arm to send a `PUBACK` back to the publishing client when it receives a QoS 1 `PUBLISH`, per MQTT 3.1.1 §3.3.4.
+
+**Rationale:** Entry #6 only implemented and tested the *client-acking-the-broker* direction (the `PubAck` no-op arm) — it never made the broker itself send an ack when a client publishes at QoS 1, which is the direction §3.3.4 actually requires and the one that matters for a real publisher. Every test written for #6 was a `protocol.rs` encode/decode round-trip; none of them exercised `handle_connection`'s dispatch logic end-to-end, so the gap wasn't caught by the test suite. It was found by running `mosquitto_pub -q 1` against the actual compiled binary — the client hung for the full timeout waiting for an ack that never came. The fix: on receipt of a QoS 1 `PUBLISH`, the broker now pushes a `PUBACK` (echoing the packet identifier) onto that connection's outbound queue immediately, before forwarding to the broker channel. Re-verified the same way the gap was found — `mosquitto_pub -q 1` against the rebuilt binary now completes immediately with a logged `received PUBACK`; QoS 0 was re-checked too, to confirm it still correctly gets no ack and doesn't hang.
 
 **Lesson for how this repo verifies things going forward:** encode/decode unit tests prove the wire format is correct in isolation; they do not prove the broker *behaves* correctly end-to-end. Anything claimed as a working "round-trip" or "flow" should be checked against a real client (mosquitto/paho-mqtt) before being logged as done, not just unit-tested.
 
-**Regression coverage added:** three tests in `connection.rs` exercise `dispatch_packet` directly (real `mpsc` channel + real `queue::QueueHandle`, no socket needed — same technique as the existing SUBACK/UNSUBACK tests) so this exact class of bug can't silently return: a QoS 1 PUBLISH must produce a matching PUBACK on the publisher's own queue, a QoS 0 PUBLISH must produce none, and multiple QoS 1 PUBLISHes must each get correctly-matched acks. Confirmed these tests actually catch the bug — not just that they pass — by temporarily reverting the fix and watching the core test fail before restoring it.
-
-**Breaking-change note:** adding `MqttPacket::PubAck` made `connection.rs`'s exhaustive `match` on `MqttPacket` fail to compile. A minimal, clearly-commented arm was added there (by Role B, flagged for Role A review — see the `// ROLE B ADDED THIS ARM` comment in `connection.rs`) purely to keep the build green: it treats a received PUBACK (client acking the broker) as a correct no-op, since there's no pending-ack state anywhere yet to clear. The *separate* broker→client ack fix above lives in the `Publish` arm, not this one.
-
-**Not yet done:** the broker publishing a QoS 1 message *to* a subscriber and expecting a PUBACK back from *them* still needs per-subscriber pending-delivery tracking in `broker.rs`'s fan-out logic. That's a real broker-state addition, not a parsing/dispatch one, and is left as a Role A integration point, same pattern as wildcard fan-out (#8).
-
-**In plain terms:** a client publishing a QoS 1 message to this broker now actually gets acknowledged — verified against a real MQTT client, not just our own tests. What's still missing: when the broker forwards a QoS 1 message on to a subscriber, it doesn't yet track whether that subscriber acknowledged it or retry if they didn't.
+**In plain terms:** Entry #6 was half-right — a client publishing at QoS 1 now actually gets acknowledged, verified against a real MQTT client, not just our own tests. What's still missing, same as noted in #6: when the broker forwards a QoS 1 message on to a subscriber, it doesn't yet track whether that subscriber acknowledged it or retry if they didn't.

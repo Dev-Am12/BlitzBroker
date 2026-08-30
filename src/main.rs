@@ -11,8 +11,9 @@ mod protocol;
 mod queue;
 
 use std::net::TcpListener;
-use std::sync::mpsc;
 use std::thread;
+
+use broker::{spawn_sharded_broker, NUM_BROKER_SHARDS};
 
 struct Config {
     host: String,
@@ -58,11 +59,10 @@ fn main() {
     let config = parse_args();
     let addr = format!("{}:{}", config.host, config.port);
 
-    let (broker_tx, broker_rx) = mpsc::channel::<broker::BrokerMessage>();
-
-    let broker_handle = thread::spawn(move || {
-        broker::run_broker(broker_rx);
-    });
+    // Spawn N independent broker threads (one per shard). Each owns a
+    // disjoint subset of topics — see DECISIONS.md #1 and PLAN.md §4 item 3.
+    let broker = spawn_sharded_broker(NUM_BROKER_SHARDS);
+    logging::info(&format!("BlitzBroker: {NUM_BROKER_SHARDS} broker shards active"));
 
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -76,9 +76,10 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let tx = broker_tx.clone();
+                // ShardedBroker is cheaply cloneable (Arc<Vec<Sender>>).
+                let broker = broker.clone();
                 thread::spawn(move || {
-                    connection::handle_connection(stream, tx);
+                    connection::handle_connection(stream, broker);
                 });
             }
             Err(e) => {
@@ -88,8 +89,7 @@ fn main() {
     }
 
     // Only reached if the listener stops iterating (shouldn't happen in
-    // normal operation). Drop the sender so the broker thread's channel
-    // closes and it can exit cleanly.
-    drop(broker_tx);
-    let _ = broker_handle.join();
+    // normal operation). Dropping the ShardedBroker closes all shard
+    // channels, allowing each broker thread to exit cleanly.
+    drop(broker);
 }

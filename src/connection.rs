@@ -10,16 +10,42 @@ use std::thread;
 
 use crate::broker::{
     next_connection_id, BrokerMessage, ConnectionId, OutboundEvent,
-    DEFAULT_CLIENT_QUEUE_CAPACITY,
+    ShardedBroker, DEFAULT_CLIENT_QUEUE_CAPACITY,
 };
 use crate::protocol::{self, ConnAckPacket, ConnectReturnCode, MqttPacket, PubAckPacket,
     SubAckPacket, UnsubAckPacket};
 use crate::queue;
 
+/// Abstraction over the broker channel so that `dispatch_packet` (and its
+/// unit tests) can use a plain `Sender<BrokerMessage>` while the
+/// production code path uses a `ShardedBroker`. Both implement this trait.
+///
+/// The trait is sealed to this module — nothing outside connection.rs
+/// should need to implement it.
+trait BrokerSend {
+    fn broker_send(&self, msg: BrokerMessage);
+}
+
+impl BrokerSend for Sender<BrokerMessage> {
+    fn broker_send(&self, msg: BrokerMessage) {
+        // Ignore send errors: if the broker thread has exited, the
+        // connection is about to be torn down anyway — the caller's
+        // subsequent read error or disconnect handling will clean up.
+        let _ = self.send(msg);
+    }
+}
+
+impl BrokerSend for ShardedBroker {
+    fn broker_send(&self, msg: BrokerMessage) {
+        // Same policy: ignore errors on broker channel close.
+        let _ = self.send(msg);
+    }
+}
+
 /// Handle one accepted TCP connection for its entire lifetime. Blocks
 /// until the client disconnects or a fatal protocol error occurs. Call
 /// this on its own thread per connection (see main.rs's accept loop).
-pub fn handle_connection(stream: TcpStream, broker_tx: Sender<BrokerMessage>) {
+pub fn handle_connection(stream: TcpStream, broker: ShardedBroker) {
     let id: ConnectionId = next_connection_id();
 
     let write_stream = match stream.try_clone() {
@@ -40,7 +66,7 @@ pub fn handle_connection(stream: TcpStream, broker_tx: Sender<BrokerMessage>) {
     // Reader runs on the calling thread; once it returns (disconnect or
     // fatal error), the outbound queue is closed so the writer thread
     // wakes up and exits too.
-    reader_loop(stream, id, broker_tx, outbound);
+    reader_loop(stream, id, broker, outbound);
 
     let _ = writer.join();
 }
@@ -48,7 +74,7 @@ pub fn handle_connection(stream: TcpStream, broker_tx: Sender<BrokerMessage>) {
 fn reader_loop(
     mut stream: TcpStream,
     id: ConnectionId,
-    broker_tx: Sender<BrokerMessage>,
+    broker: ShardedBroker,
     outbound: queue::QueueHandle<OutboundEvent>,
 ) {
     let mut buf: Vec<u8> = Vec::new();
@@ -70,9 +96,9 @@ fn reader_loop(
             match protocol::decode(&buf) {
                 Ok((packet, consumed)) => {
                     buf.drain(..consumed);
-                    if !dispatch_packet(id, packet, &broker_tx, &outbound) {
+                    if !dispatch_packet(id, packet, &broker, &outbound) {
                         // Fatal per protocol (DISCONNECT received).
-                        let _ = broker_tx.send(BrokerMessage::Disconnect { id });
+                        let _ = broker.send(BrokerMessage::Disconnect { id });
                         outbound.close();
                         return;
                     }
@@ -80,7 +106,7 @@ fn reader_loop(
                 Err(crate::error::ProtocolError::Incomplete) => break, // wait for more bytes
                 Err(e) => {
                     crate::logging::warn(&format!("connection {id}: protocol error: {e}"));
-                    let _ = broker_tx.send(BrokerMessage::Disconnect { id });
+                    let _ = broker.send(BrokerMessage::Disconnect { id });
                     outbound.close();
                     return;
                 }
@@ -88,7 +114,7 @@ fn reader_loop(
         }
     }
 
-    let _ = broker_tx.send(BrokerMessage::Disconnect { id });
+    let _ = broker.send(BrokerMessage::Disconnect { id });
     outbound.close();
 }
 
@@ -97,12 +123,12 @@ fn reader_loop(
 fn dispatch_packet(
     id: ConnectionId,
     packet: MqttPacket,
-    broker_tx: &Sender<BrokerMessage>,
+    broker_tx: &dyn BrokerSend,
     outbound: &queue::QueueHandle<OutboundEvent>,
 ) -> bool {
     match packet {
         MqttPacket::Connect(connect) => {
-            let _ = broker_tx.send(BrokerMessage::Register {
+            broker_tx.broker_send(BrokerMessage::Register {
                 id,
                 client_id: connect.client_id,
                 outbound: outbound.clone(),
@@ -125,7 +151,7 @@ fn dispatch_packet(
             // filter's slot without restructuring anything else here.
             let mut return_codes: Vec<u8> = Vec::with_capacity(sub.subscriptions.len());
             for (topic, _qos) in sub.subscriptions {
-                let _ = broker_tx.send(BrokerMessage::Subscribe { id, topic });
+                broker_tx.broker_send(BrokerMessage::Subscribe { id, topic });
                 // §3.9.3 Table 3.4: 0x00 = Success – Maximum QoS 0.
                 return_codes.push(0x00);
             }
@@ -137,7 +163,7 @@ fn dispatch_packet(
         }
         MqttPacket::Unsubscribe(unsub) => {
             for topic in unsub.topic_filters {
-                let _ = broker_tx.send(BrokerMessage::Unsubscribe { id, topic });
+                broker_tx.broker_send(BrokerMessage::Unsubscribe { id, topic });
             }
             // MQTT 3.1.1 §3.11: the broker MUST send UNSUBACK in response
             // to a UNSUBSCRIBE request (fixed-format, packet_id only).
@@ -169,7 +195,7 @@ fn dispatch_packet(
                 // skipping the ack rather than panicking is the safe
                 // fallback either way.
             }
-            let _ = broker_tx.send(BrokerMessage::Publish {
+            broker_tx.broker_send(BrokerMessage::Publish {
                 from: id,
                 packet: publish,
             });
