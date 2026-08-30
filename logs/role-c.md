@@ -72,3 +72,44 @@ The combination of the existing single-topic test and this new multi-topic
 test together fully covers the disconnect-cleanup behavior at the unit level.
 Full integration testing against a real MQTT client remains in the queue.
 
+
+## 2026-08-30 — Phase 3: in-process stress test for drop-oldest accounting (broker.rs)
+
+Added one test to the `#[cfg(test)]` module in `src/broker.rs`:
+
+- **`stress_no_data_loss_beyond_drop_oldest`**: Two-scenario stress test verifying
+  the received + dropped == total_published invariant against the real broker and
+  queue implementation, with no TCP sockets involved.
+
+**Scenario A — no-drop load (N=20 clients, M=5 topics, 50 msgs/topic):**
+  Each client is subscribed to exactly one topic (round-robin assignment). 50 messages
+  are published to each topic. 50 < DEFAULT_CLIENT_QUEUE_CAPACITY (128), so zero drops
+  are expected. After drop(tx) + broker.join() (guarantees all messages processed),
+  each client's queue is closed and drained. The assertion is exact:
+  received == 50 for every client. Any deviation means a message was silently lost
+  (too few) or misrouted (wrong client gets extra).
+
+**Scenario B — over-capacity load (drop path, 148 msgs into a 128-capacity queue):**
+  One client, one topic, DEFAULT_CLIENT_QUEUE_CAPACITY + 20 = 148 messages. The
+  queue must retain exactly DEFAULT_CLIENT_QUEUE_CAPACITY = 128 items after the
+  broker finishes. This verifies: (a) drop-oldest fires correctly and drops exactly
+  20 items, and (b) no further silent loss occurs beyond the documented policy.
+
+**Test location decision:** broker.rs #[cfg(test)] module (not tests/stress.rs),
+because blitzbroker is a binary crate with no lib.rs — a Cargo integration test
+cannot import from it without adding a lib target (a non-test structural change
+outside Phase 3 scope). See Personal_Decisions.md Decision 3A.
+
+**N/M values:** 20 clients, 5 topics, 50 msgs/topic for Scenario A; 1 client,
+1 topic, 148 msgs for Scenario B. Values chosen to be meaningful (genuine
+fan-out loop exercise, genuine drop-oldest path exercise) while staying well
+below CI flakiness territory. See Personal_Decisions.md Decision 3B.
+
+**Flakiness check:** Ran cargo test twice consecutively — 59 passed both times,
+no failures observed. The test is structurally race-free: the broker is serial,
+all BrokerMessages are enqueued before the channel closes, and broker.join()
+guarantees completion before any queue is inspected.
+
+**All 59 tests pass** (58 pre-existing + 1 new). No non-test code modified.
+No new dependencies added.
+

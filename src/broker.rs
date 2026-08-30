@@ -292,4 +292,166 @@ mod tests {
             "disconnected client must not receive publishes on any of its former topics"
         );
     }
+
+    /// Stress test: no data loss beyond the documented drop-oldest policy.
+    ///
+    /// Two scenarios in one test (see Personal_Decisions.md Decision 3B/3C):
+    ///
+    /// **Scenario A — no-drop load:** 20 clients across 5 topics, 50 messages
+    /// per topic. 50 < DEFAULT_CLIENT_QUEUE_CAPACITY (128), so zero drops are
+    /// expected. Each client is subscribed to exactly one topic (round-robin),
+    /// so each client must receive exactly 50 messages. A deviation means either
+    /// a message was silently lost or a message was delivered to the wrong client.
+    ///
+    /// **Scenario B — over-capacity load (drop path):** 1 client subscribed to 1
+    /// topic, DEFAULT_CLIENT_QUEUE_CAPACITY + 20 = 148 messages published. The
+    /// queue drops the oldest 20 to stay at capacity. After the broker finishes,
+    /// draining the queue must yield exactly DEFAULT_CLIENT_QUEUE_CAPACITY = 128
+    /// items — no more (no duplication), no fewer (no silent extra loss beyond
+    /// the documented drop-oldest policy).
+    ///
+    /// Both scenarios use the same drain-after-join strategy: drop(tx) and
+    /// broker.join() before closing/draining queues, ensuring all Publish
+    /// messages have been fully processed before we count. This is structurally
+    /// race-free: the broker is serial, all BrokerMessages are queued before the
+    /// channel closes, and join() guarantees completion.
+    #[test]
+    fn stress_no_data_loss_beyond_drop_oldest() {
+        // ── Scenario A: no-drop load ──────────────────────────────────────────
+        // N clients, M topics. Each client subscribes to exactly one topic
+        // (client i → topic i % M). The broker must fan out exactly
+        // MSGS_PER_TOPIC messages to each subscriber of that topic.
+        const N_CLIENTS: usize = 20;
+        const N_TOPICS: usize = 5;
+        const MSGS_PER_TOPIC: usize = 50; // < DEFAULT_CLIENT_QUEUE_CAPACITY (128)
+
+        let (tx, rx) = mpsc::channel::<BrokerMessage>();
+        let broker = thread::spawn(move || run_broker(rx));
+
+        // Create per-client queues sized at the real production capacity.
+        let queues: Vec<crate::queue::QueueHandle<OutboundEvent>> = (0..N_CLIENTS)
+            .map(|_| crate::queue::new::<OutboundEvent>(DEFAULT_CLIENT_QUEUE_CAPACITY))
+            .collect();
+
+        // Register all clients.
+        for (i, q) in queues.iter().enumerate() {
+            let id = (i + 100) as u64; // ids 100..119, no collision with other tests
+            tx.send(BrokerMessage::Register {
+                id,
+                client_id: format!("stress-client-{}", i),
+                outbound: q.clone(),
+            })
+            .unwrap();
+        }
+
+        // Subscribe each client to exactly one topic (round-robin).
+        // Client i → topic "stress/t{i % N_TOPICS}".
+        for i in 0..N_CLIENTS {
+            let id = (i + 100) as u64;
+            let topic = format!("stress/t{}", i % N_TOPICS);
+            tx.send(BrokerMessage::Subscribe { id, topic }).unwrap();
+        }
+
+        // Publish MSGS_PER_TOPIC messages to each topic, from a dummy sender.
+        for t in 0..N_TOPICS {
+            let topic = format!("stress/t{}", t);
+            for seq in 0..MSGS_PER_TOPIC {
+                tx.send(BrokerMessage::Publish {
+                    from: 0,
+                    packet: PublishPacket {
+                        topic: topic.clone(),
+                        // Encode (topic_index, seq) in the payload for
+                        // potential debugging — not verified here, just
+                        // counted.
+                        payload: format!("t{}:{}", t, seq).into_bytes(),
+                        qos: 0,
+                        retain: false,
+                        packet_id: None,
+                    },
+                })
+                .unwrap();
+            }
+        }
+
+        // Shut the broker down and wait for it to finish processing every
+        // message before we touch the queues.
+        drop(tx);
+        broker.join().unwrap();
+
+        // Drain each client's queue. Since MSGS_PER_TOPIC < CAPACITY, zero
+        // drops are expected: every client must receive exactly MSGS_PER_TOPIC
+        // messages.
+        for (i, q) in queues.into_iter().enumerate() {
+            q.close();
+            let mut received: usize = 0;
+            while q.pop_blocking().is_some() {
+                received += 1;
+            }
+            assert_eq!(
+                received,
+                MSGS_PER_TOPIC,
+                "scenario A: client {} (topic stress/t{}) received {} messages, expected {}",
+                i,
+                i % N_TOPICS,
+                received,
+                MSGS_PER_TOPIC,
+            );
+        }
+
+        // ── Scenario B: over-capacity load (drop path) ────────────────────────
+        // One client, one topic, DEFAULT_CLIENT_QUEUE_CAPACITY + 20 publishes.
+        // The queue must contain exactly DEFAULT_CLIENT_QUEUE_CAPACITY items
+        // after the broker finishes — the excess 20 are dropped (oldest-first),
+        // and no further silent loss occurs.
+        const OVER: usize = DEFAULT_CLIENT_QUEUE_CAPACITY + 20; // 148
+
+        let (tx2, rx2) = mpsc::channel::<BrokerMessage>();
+        let broker2 = thread::spawn(move || run_broker(rx2));
+
+        let single_q = crate::queue::new::<OutboundEvent>(DEFAULT_CLIENT_QUEUE_CAPACITY);
+        tx2.send(BrokerMessage::Register {
+            id: 200,
+            client_id: "stress-overflow".into(),
+            outbound: single_q.clone(),
+        })
+        .unwrap();
+        tx2.send(BrokerMessage::Subscribe {
+            id: 200,
+            topic: "stress/overflow".into(),
+        })
+        .unwrap();
+
+        for seq in 0..OVER {
+            tx2.send(BrokerMessage::Publish {
+                from: 0,
+                packet: PublishPacket {
+                    topic: "stress/overflow".into(),
+                    payload: format!("msg:{}", seq).into_bytes(),
+                    qos: 0,
+                    retain: false,
+                    packet_id: None,
+                },
+            })
+            .unwrap();
+        }
+
+        drop(tx2);
+        broker2.join().unwrap();
+
+        single_q.close();
+        let mut received_b: usize = 0;
+        while single_q.pop_blocking().is_some() {
+            received_b += 1;
+        }
+        // The queue holds at most CAPACITY items. The 20 oldest were dropped to
+        // make room. No further items should be missing.
+        assert_eq!(
+            received_b,
+            DEFAULT_CLIENT_QUEUE_CAPACITY,
+            "scenario B: expected exactly {} items after {}-message overflow (drop-oldest), got {}",
+            DEFAULT_CLIENT_QUEUE_CAPACITY,
+            OVER,
+            received_b,
+        );
+    }
 }
