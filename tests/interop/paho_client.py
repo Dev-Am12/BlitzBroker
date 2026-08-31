@@ -15,8 +15,8 @@ NOT A CARGO TEST
 This script is intentionally NOT wired into `cargo test`. Making
 `cargo test` depend on externally-installed tools (paho-mqtt) would break
 CI on any machine without them and could be misread as an undisclosed
-runtime dependency by a hackathon judge. See Personal_Decisions.md,
-Decision 4. Run this manually after building:
+runtime dependency by a hackathon judge. See DECISIONS.md,
+Decision 12. Run this manually after building:
 
     python tests/interop/paho_client.py
 

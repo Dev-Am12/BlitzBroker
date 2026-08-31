@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # tests/interop/mosquitto.sh
 #
 # BlitzBroker interop verification -- mosquitto_pub / mosquitto_sub round-trip.
@@ -12,8 +12,8 @@
 #   This script is intentionally NOT wired into `cargo test`. Making
 #   `cargo test` depend on externally-installed tools (mosquitto) would break
 #   CI on any machine without them and could be misread as an undisclosed
-#   runtime dependency by a hackathon judge. See Personal_Decisions.md,
-#   Decision 4. Run this manually after building:
+#   runtime dependency by a hackathon judge. See DECISIONS.md,
+#   Decision 12. Run this manually after building:
 #
 #     bash tests/interop/mosquitto.sh
 #
