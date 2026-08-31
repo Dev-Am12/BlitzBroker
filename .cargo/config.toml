@@ -1,0 +1,5 @@
+[build]
+# --remap-path-prefix rewrites every absolute source path embedded in the binary
+# to a stable relative form ("blitzbroker/src/...").
+# This makes the binary identical regardless of where the repo is checked out.
+rustflags = ["--remap-path-prefix", "=blitzbroker/"]

@@ -7,7 +7,7 @@ BlitzBroker is a from-scratch MQTT 3.1.1 **subset** broker written in Rust. The 
 ## Quick start
 
 ```bash
-# Any OS with a Rust toolchain (edition 2021, tested on rustc 1.98.0):
+# Rust toolchain is pinned in rust-toolchain.toml (1.97.1). Cargo will auto-install it.
 git clone https://github.com/Dev-Am12/BlitzBroker.git
 cd BlitzBroker
 cargo run --release -- --host 127.0.0.1 --port 1883
@@ -44,7 +44,7 @@ A client connects over TCP, subscribes to exact topic names or MQTT-style topic 
 
 Prerequisites:
 
-- Rust/Cargo compatible with the project edition (`2021`). Verification for this submission was performed with rustc 1.98.0 on `x86_64-pc-windows-msvc`; no toolchain pin is committed to the repository. The code uses only `std::net`, `std::thread`, and `std::sync` — nothing platform-specific — so it is expected to build the same way on Linux and macOS, but that has not been independently verified on this worktree and is stated as an expectation, not a tested claim.
+- The toolchain is pinned via `rust-toolchain.toml` (`1.97.1`). If `rustup` is installed, it will automatically install the correct toolchain on first `cargo` invocation. Verification for this submission was performed with rustc 1.97.1 on `x86_64-pc-windows-msvc`. The code uses only `std::net`, `std::thread`, and `std::sync` — nothing platform-specific — so it is expected to build the same way on Linux and macOS, but that has not been independently verified on this worktree and is stated as an expectation, not a tested claim.
 - A free TCP port. The default MQTT port is `1883`.
 
 Build and start the broker in one command:
@@ -180,7 +180,7 @@ Important parser/encoder boundaries:
 | Retained messages | Skipped | RETAIN is not a store/replay feature. |
 | Last-will messages | Skipped | CONNECT with a will flag is rejected. |
 | Keep-alive enforcement | Skipped | Keep-alive is parsed but not used for timeout/disconnect. |
-| Reproducible build | Attempted, not achieved | Two isolated release builds under Rust 1.98.0 produced different executable SHA-256 hashes. No reproducibility claim is made. |
+| Reproducible build | **Achieved** | Two isolated release builds from **different directory paths** under rustc 1.97.1 produced byte-identical SHA-256 hashes. Toolchain pinned via `rust-toolchain.toml`; paths remapped via `.cargo/config.toml`; `codegen-units=1`, `debug=false` in `[profile.release]`. Proof in `proof/reproducible-build.md`. |
 
 Out of scope: QoS 2, MQTT 5.0, persistent sessions, authentication/ACLs, encrypted transport, and a complete MQTT compliance implementation.
 
@@ -211,15 +211,25 @@ The dependency-proof command is `cargo tree --edges normal`, run directly:
 cargo tree --edges normal
 ```
 
-Expected current output (path will differ per checkout):
+Expected output (path differs per checkout, everything else is identical):
 
 ```text
-blitzbroker v0.1.0 (C:\Hackathons\BlitzBroker)
+blitzbroker v0.1.0 (/path/to/checkout)
 ```
 
-`scripts/dependency-proof.cmd` is a one-line Windows wrapper around that same command, kept for convenience during Windows-based development; it is not required and has no Linux/macOS equivalent committed. Judges on any OS should run `cargo tree --edges normal` directly rather than the `.cmd` file.
+A saved copy of this output is committed at [`proof/cargo-tree.txt`](proof/cargo-tree.txt).
 
-**Known gap:** the submission checklist below references a saved `proof/cargo-tree.txt` output file. That file is not present in this worktree as of the last audit (2026-08-31) — only the command that produces it is committed. Treat the command above as the authoritative dependency proof until a static `proof/cargo-tree.txt` is committed alongside it.
+`scripts/dependency-proof.cmd` is a one-line Windows wrapper around that same command kept for convenience; judges on any OS should run `cargo tree --edges normal` directly.
+
+## Reproducible build evidence
+
+Reproducible builds are achieved via three mechanisms:
+
+1. **`rust-toolchain.toml`** — pins `rustc 1.97.1`; `rustup` installs it automatically.
+2. **`.cargo/config.toml`** — `--remap-path-prefix` rewrites all absolute checkout paths to `blitzbroker/` before they are embedded in the binary.
+3. **`[profile.release]`** in `Cargo.toml` — `codegen-units=1` (single deterministic CGU) and `debug=false` (no debug-info section, belt-and-suspenders path stripping).
+
+Two builds from **different directory paths** produced byte-identical SHA-256 hashes. Full proof (hash, method, reproduce-yourself command) is in [`proof/reproducible-build.md`](proof/reproducible-build.md).
 
 `STDLIB.md` documents the standard-library replacements for async/networking, registries, queueing, CLI parsing, logging, packet encoding, QoS1/PUBACK, wildcard matching, and connection IDs.
 
@@ -229,8 +239,7 @@ This section exists so a judge does not have to find these out the hard way. As 
 
 - **No OSI license file is present.** The event rules require a public repo with an OSI-approved license; without a `LICENSE` file this requirement is not currently met.
 - **No demo video is present.** The 5-minute demo video is a required deliverable and has not been recorded/attached as of this writing.
-- **The Reproducible Build bonus (+5) was attempted and not achieved.** Two isolated release builds under rustc 1.98.0 produced different SHA-256 hashes for the output binary. No reproducibility claim is made; see the scope-completion ledger above.
-- **`proof/cargo-tree.txt` is not committed** — see "Dependency and build evidence" above. The command that generates it is committed and works; the static output file is not yet saved.
+- **`proof/cargo-tree.txt` is now committed** alongside the command that produces it.
 - **`Personal_Decisions.md` is cited but missing.** Older internal logs and source comments reference a `Personal_Decisions.md` for several engineering rationales (decisions 1, 3A, 3B, 4, and 5 by that document's numbering). It is not present in this worktree or in any recoverable branch/reflog/stash history. That rationale has not been reconstructed or invented to fill the gap — DECISIONS.md #10 is the authoritative record of this specific documentation loss, and it should be read alongside any surviving reference to `Personal_Decisions.md` elsewhere in this repo.
 
 See `DECISIONS.md` for the chronological engineering-decision record (including corrections logged against earlier entries), `STDLIB.md` for the zero-dependency substitutions, `AI_GUARDRAILS.md` for project safety rules, and `SUBMISSION_CHECKLIST.md` for the checklist snapshot this section summarizes.

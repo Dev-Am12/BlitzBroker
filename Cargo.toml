@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+
+# Reproducible-build profile.
+# codegen-units = 1 : single deterministic CGU — eliminates parallel-CGU ordering
+#                     non-determinism in symbol layout.
+# debug = false      : strips debug-info (which embeds absolute source paths) from
+#                      the release binary. Belt-and-suspenders alongside the
+#                      --remap-path-prefix flag in .cargo/config.toml.
+[profile.release]
+codegen-units = 1
+debug = false

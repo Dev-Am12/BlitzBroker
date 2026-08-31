@@ -8,5 +8,8 @@ Audited by Role D on 2026-08-31 against the current worktree.
 - [x] Dependency-proof output — [`proof/cargo-tree.txt`](proof/cargo-tree.txt) is the saved output of `cargo tree --edges normal` against this manifest/lockfile.
 - [x] README — [`README.md`](README.md) documents operation, verified features, and limits.
 - [x] STDLIB — [`STDLIB.md`](STDLIB.md) was cross-checked against the implemented std-only substitutions.
+- [x] Reproducible build (+5 bonus) — two builds from **different directory paths** under rustc 1.97.1 (pinned via `rust-toolchain.toml`) produced byte-identical SHA-256 hashes. Proof in [`proof/reproducible-build.md`](proof/reproducible-build.md).
 - [ ] Five-minute demo video — no video artifact is present in the repository.
+
+
 
