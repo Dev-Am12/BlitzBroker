@@ -1,0 +1,2 @@
+track = "C"
+pitch = "A std-only MQTT 3.1.1-subset broker with sharded topic routing, wildcard fan-out, QoS 1 PUBACK, and retained messages."

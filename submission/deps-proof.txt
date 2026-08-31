@@ -1,0 +1,14 @@
+BlitzBroker single-file submission dependency proof
+
+The submission builds directly with rustc and ships no Cargo.toml, so it has no Cargo dependency graph and no third-party runtime dependencies.
+
+Original development manifest (the equivalent dependency proof):
+
+[package]
+name = "blitzbroker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+The [dependencies] section is intentionally empty.
