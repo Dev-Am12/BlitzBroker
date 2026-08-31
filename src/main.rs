@@ -18,14 +18,19 @@ use broker::{spawn_sharded_broker, NUM_BROKER_SHARDS};
 struct Config {
     host: String,
     port: u16,
+    /// Number of broker shards. Defaults to NUM_BROKER_SHARDS (4).
+    /// Exposed via --shards <N> to allow before/after shard-count comparison
+    /// without maintaining separate builds — see DECISIONS.md #11.
+    num_shards: usize,
 }
 
 /// Hand-rolled CLI parsing — see STDLIB.md (`clap` substitution). Accepts
-/// `--host <addr>` and `--port <port>`; both optional with sane
-/// defaults.
+/// `--host <addr>`, `--port <port>`, and `--shards <N>`; all optional with
+/// sane defaults.
 fn parse_args() -> Config {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 1883; // MQTT's conventional default port
+    let mut num_shards: usize = NUM_BROKER_SHARDS;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -45,6 +50,18 @@ fn parse_args() -> Config {
                     i += 1;
                 }
             }
+            "--shards" => {
+                if let Some(v) = args.get(i + 1) {
+                    match v.parse::<usize>() {
+                        Ok(n) if n >= 1 => num_shards = n,
+                        _ => logging::warn(&format!(
+                            "--shards must be a positive integer, ignoring value {:?}",
+                            v
+                        )),
+                    }
+                    i += 1;
+                }
+            }
             other => {
                 logging::warn(&format!("ignoring unrecognized argument: {other}"));
             }
@@ -52,7 +69,11 @@ fn parse_args() -> Config {
         i += 1;
     }
 
-    Config { host, port }
+    Config {
+        host,
+        port,
+        num_shards,
+    }
 }
 
 fn main() {
@@ -61,8 +82,11 @@ fn main() {
 
     // Spawn N independent broker threads (one per shard). Each owns a
     // disjoint subset of topics — see DECISIONS.md #1 and PLAN.md §4 item 3.
-    let broker = spawn_sharded_broker(NUM_BROKER_SHARDS);
-    logging::info(&format!("BlitzBroker: {NUM_BROKER_SHARDS} broker shards active"));
+    let broker = spawn_sharded_broker(config.num_shards);
+    logging::info(&format!(
+        "BlitzBroker: {} broker shard(s) active",
+        config.num_shards
+    ));
 
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
