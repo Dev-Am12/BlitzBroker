@@ -1,18 +1,19 @@
 # STDLIB.md — BlitzBroker
 
-Every package we'd normally install, and the std feature we used instead. **Owner: Role D compiles/enforces this, but whoever makes a substitution adds the entry the same day — don't reconstruct this at the end.**
+Every package we'd normally install, and the std feature we used instead. **Owner: Role D compiles/enforces this, but whoever makes a substitution adds the entry the same day.** Entries below were cross-checked against `protocol.rs`, `broker.rs`, `connection.rs`, `queue.rs`, and `logging.rs` on 2026-08-31.
 
 Format per entry: `Package we'd normally use → std feature used instead — one-line rationale`
 
-## Seeded entries (known from the plan, fill in specifics as implemented)
+## Implemented substitutions
 
-- `tokio` → `std::thread` + `std::sync::mpsc` — thread-per-connection + actor-model broker thread instead of an async runtime; see DECISIONS.md for the concurrency trade-off.
-- `serde` (+ a hand-written MQTT codec crate) → hand-rolled packet encode/decode per MQTT 3.1.1 spec — no JSON/serialization framework needed since the wire format is fixed-layout binary, not a generic serialization problem.
-- `clap` → hand-rolled `std::env::args()` parsing — CLI surface is small (host/port), didn't justify a parsing framework.
-- `log` / `tracing` → hand-rolled leveled logger over `std::time` + stdout — no need for structured/async logging at this scale.
-- `dashmap` / a concurrent-hashmap crate → **not needed at all**, and that's itself the point: the actor model routes every registry mutation through one owning thread, so there's no concurrent-map problem to solve in the first place.
-- `crossbeam` (bounded channel/queue utilities) → hand-rolled bounded queue with drop-oldest policy over `std::collections::VecDeque` — small enough to implement and test directly, and the drop-oldest policy is a deliberate design choice worth owning rather than inheriting a general-purpose library's defaults.
+- `tokio` / `mio` → `std::net::{TcpListener, TcpStream}`, `std::thread`, and `std::sync::mpsc` — one connection handler per TCP connection and actor-message routing without an async runtime (DECISIONS.md #1, #8).
+- `dashmap` / concurrent-map crates → shard-owned `std::collections::HashMap` — registry state has one owner per shard; `ShardedBroker` uses `std::sync::Arc`, `mpsc::Sender`, and `DefaultHasher` to route exact topics and broadcast wildcard subscriptions (DECISIONS.md #8, #9).
+- `crossbeam` / `flume` bounded-channel utilities → hand-rolled `VecDeque` behind `std::sync::{Mutex, Condvar, Arc}` — the queue must drop the oldest buffered item instead of blocking the broker behind a slow subscriber (PLAN.md §3; `queue.rs`).
+- `clap` → hand-rolled `std::env::args()` parsing — the CLI only accepts `--host` and `--port` (`main.rs`).
+- `log` / `tracing` → small logger using `std::time::{SystemTime, UNIX_EPOCH}` and stdout/stderr — timestamped levelled output is sufficient for this broker (`logging.rs`).
+- `serde`, `bytes`, or an MQTT codec crate such as `mqttbytes` → hand-rolled MQTT 3.1.1 packet codec using `Vec<u8>`, byte slices, `std::str`, and checked lengths — the broker needs a fixed binary wire format, including malformed-input rejection, not general-purpose serialization (`protocol.rs`).
+- MQTT QoS helpers from a broker/client crate → explicit `PUBLISH` QoS 0/1 and `PUBACK` encode/decode plus connection dispatch — QoS 1 publisher acknowledgements are implemented without a protocol dependency; subscriber pending-ack tracking/retry is intentionally absent (DECISIONS.md #6, #7).
+- MQTT topic-filter helpers → iterative `str::split`-based validation and matching — `+` and `#` filter support is implemented locally and the broker performs a de-duplicated wildcard fan-out pass (DECISIONS.md #5, #9).
+- `uuid` / connection-ID helpers → `std::sync::atomic::AtomicU64` — locally unique connection IDs avoid an additional identifier dependency; MQTT client-ID session collision handling remains out of scope (`broker.rs`).
 
-## Add entries below as work progresses
-
-_(date, entry, who added it)_
+Developer-only paho-mqtt and mosquitto tools in `tests/interop/` are not Rust runtime dependencies and are not listed in `Cargo.toml`/`Cargo.lock`.

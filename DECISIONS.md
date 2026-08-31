@@ -13,6 +13,7 @@ Every load-bearing technical or architectural decision made during this build, i
 - [7. Correction to #6: the broker→client ack direction was missing, found via live verification, now fixed](#7-correction-to-6-the-brokerclient-ack-direction-was-missing-found-via-live-verification-now-fixed)
 - [8. Sharded broker: topic registry split into N independent single-threaded shards](#8-sharded-broker-topic-registry-split-into-n-independent-single-threaded-shards)
 - [9. Correction to #5: wildcard fan-out is now wired in, and required extending #8's shard-broadcast treatment to wildcard subscriptions](#9-correction-to-5-wildcard-fan-out-is-now-wired-in-and-required-extending-8s-shard-broadcast-treatment-to-wildcard-subscriptions)
+- [10. Missing Personal_Decisions.md rationale record](#10-missing-personal_decisionsmd-rationale-record)
 
 ---
 
@@ -113,3 +114,13 @@ Every load-bearing technical or architectural decision made during this build, i
 **Rationale:** #5 correctly identified that `broker.rs` never consulted wildcard filters at all. What #5 didn't anticipate, because sharding didn't exist yet, is that hash-routing a wildcard filter string is itself wrong: `"sensors/+/temp"` and a matching concrete publish like `"sensors/kitchen/temp"` are different strings that generally hash to different shards, so even after wiring in the matching function, a single shard's Publish handler would usually not have the relevant wildcard subscription available to check against. Both halves of the fix were necessary together. Verified independently (not just by the automated suite that was written alongside this fix): three different `+`-filter/topic pairs and one `#`-filter case, deliberately varied to increase the odds of landing on different shards, all delivered correctly through the live broker with real mosquitto clients; a non-matching case correctly delivered nothing.
 
 **In plain terms:** #5 found the first half of the bug (the broker wasn't checking wildcards at all). Fixing it exposed a second half that only existed because of the sharding work in #8 — a wildcard subscription and the message that should match it can easily end up on different shards, so wildcard subscriptions now get told to every shard instead of just one. Tested with real MQTT clients, deliberately across several different topic names to make sure it wasn't just getting lucky on one shard.
+
+---
+
+## 10. Missing `Personal_Decisions.md` rationale record
+
+**Record:** Multiple Role C logs, source comments, and interop-script comments cite `Personal_Decisions.md` Decisions 1, 3A, 3B, 4, and 5. The file is not present in the worktree, any tracked local or remote branch, reflog-reachable history, the available stash, or the sole unreachable Git tree inspected on 2026-08-31. The underlying rationale text therefore cannot be recovered from repository history.
+
+**Disposition:** Do not infer, recreate, or renumber these missing decisions. The cited choices may have been made, but their documented reasoning is unavailable. Existing citations are retained as provenance warnings; this entry is the authoritative record of the documentation gap until the original author supplies the source material. README.md must disclose this unresolved record rather than presenting invented rationale as fact.
+
+**In plain terms:** Several files point to a decision note that was never committed here. We know the references exist, but not the reasoning they were supposed to point to, so we are flagging the hole instead of making up an explanation.
