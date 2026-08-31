@@ -137,5 +137,3 @@ Every load-bearing technical or architectural decision made during this build, i
 **Decision:** The interop tests (`mosquitto.sh`, `paho_client.py`) are standalone developer tools and are strictly prohibited from being invoked via `std::process::Command` inside a `cargo test`.
 **Rationale:** Wiring external tools into `cargo test` creates a hidden environmental dependency. If a machine (like a standard CI runner or a judge's environment) lacks `mosquitto` or `paho-mqtt`, `cargo test` would fail or noisily skip, violating the zero-dependency spirit of the project. Keeping them standalone guarantees that the Rust test suite runs cleanly and is completely self-contained everywhere.
 **In plain terms:** Our Rust test suite only tests Rust code and needs zero external tools to pass. The tests that actually talk to real Python or Mosquitto clients are separate scripts you have to run on purpose, preventing `cargo test` from randomly failing just because you don't have Python or Mosquitto installed.
-
-[def]: #10-missing-personal_decisionsmd-rationale-record
