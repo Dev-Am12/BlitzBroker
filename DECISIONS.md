@@ -128,4 +128,14 @@ Every load-bearing technical or architectural decision made during this build, i
 **In plain terms:** The publish client has its own small copy of the packet-building code it needs, rather than sharing the broker's. They talk the same wire format — checked by test — but aren't linked together in the build.
 
 
+## 11. Crate structure: pure binary crate without a `lib.rs` (Integration stress tests kept inline)
+**Decision:** Keep BlitzBroker as a pure binary crate (only `main.rs` and inline modules) and place the heavy, cross-component stress tests in the `#[cfg(test)]` block of `src/broker.rs`, rather than using Cargo's `tests/` directory.
+**Rationale:** Cargo integration tests in `tests/*.rs` can only import from a crate's library target. Adding a `lib.rs` or a `[lib]` section to `Cargo.toml` solely to expose internal structures for testing is a non-trivial structural change that unnecessarily complicates a single-purpose binary. Using `super::*` from within `src/broker.rs`'s test module provides the necessary access to `BrokerMessage`, `run_broker`, and queue internals without altering the crate's architecture.
+**In plain terms:** We didn't split the project into a library and a binary just to make a separate `tests/` folder work. We put our heavy stress tests right next to the broker code so they can directly access its internal moving parts.
+
+## 12. Interop tests: standalone external scripts, completely decoupled from `cargo test`
+**Decision:** The interop tests (`mosquitto.sh`, `paho_client.py`) are standalone developer tools and are strictly prohibited from being invoked via `std::process::Command` inside a `cargo test`.
+**Rationale:** Wiring external tools into `cargo test` creates a hidden environmental dependency. If a machine (like a standard CI runner or a judge's environment) lacks `mosquitto` or `paho-mqtt`, `cargo test` would fail or noisily skip, violating the zero-dependency spirit of the project. Keeping them standalone guarantees that the Rust test suite runs cleanly and is completely self-contained everywhere.
+**In plain terms:** Our Rust test suite only tests Rust code and needs zero external tools to pass. The tests that actually talk to real Python or Mosquitto clients are separate scripts you have to run on purpose, preventing `cargo test` from randomly failing just because you don't have Python or Mosquitto installed.
+
 [def]: #10-missing-personal_decisionsmd-rationale-record

@@ -17,3 +17,7 @@ Format per entry: `Package we'd normally use → std feature used instead — on
 - `uuid` / connection-ID helpers → `std::sync::atomic::AtomicU64` — locally unique connection IDs avoid an additional identifier dependency; MQTT client-ID session collision handling remains out of scope (`broker.rs`).
 
 Developer-only paho-mqtt and mosquitto tools in `tests/interop/` are not Rust runtime dependencies and are not listed in `Cargo.toml`/`Cargo.lock`.
+
+- `proptest` / `cargo-fuzz` → hand-rolled adversarial byte sequences in `cargo test` (e.g., `decode_never_panics_on_random_bytes` and max `remaining_length` tests) — fuzz-guarding is achieved via targeted edge-case unit tests rather than injecting an external property-testing or fuzzing framework dependency.
+
+- `assert_cmd` / Rust test-client crates (e.g., `rumqttc`) → standalone Python and Bash scripts (`paho_client.py`, `mosquitto.sh`) — end-to-end integration and interop are verified via system subprocesses driving standard tools, keeping the Rust test suite strictly self-contained and free of test-only external crates.
