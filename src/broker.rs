@@ -23,6 +23,18 @@
 //! Exact-match filters (no wildcards) continue to route to a single shard
 //! by hash, unchanged — the fast path is preserved.
 //!
+//! Retained messages (PLAN.md §4 item 4):
+//! Each shard owns a `retained: HashMap<String, PublishPacket>` alongside
+//! its subscriber registry. A `Publish` with `retain=true` stores or clears
+//! (on empty payload, §3.3.1.3) the retained message for that topic — on the
+//! same shard that receives the publish (which is always `shard_for_topic(T)`
+//! for concrete topic T). A `Subscribe` checks this store for matches and
+//! immediately delivers them to the new subscriber. Sharding is correct by
+//! construction: exact-match subscribes route to the same shard as the
+//! retained message; wildcard subscribes broadcast to ALL shards (DECISIONS
+//! #9), so the broadcast guarantees every retained message is reachable.
+//! No cross-shard coordination is required.
+//!
 //! Owner: Role A.
 
 use std::collections::HashMap;
@@ -142,9 +154,15 @@ struct ClientState {
 /// runs; nothing else may touch topic/subscriber state directly.
 pub fn run_broker(rx: Receiver<BrokerMessage>) {
     let mut clients: HashMap<ConnectionId, ClientState> = HashMap::new();
-    // topic -> subscribed connection ids. Exact-match only in core scope
-    // (no +/# wildcards — see PLAN.md §4 extra #1).
+    // topic -> subscribed connection ids. Supports both exact filters and
+    // wildcard filters ('+' / '#'); see DECISIONS.md #5/#9.
     let mut topics: HashMap<String, Vec<ConnectionId>> = HashMap::new();
+    // Retained messages (PLAN.md §4 item 4 / §3.3.1.3):
+    // Maps an exact topic string → the most recent retained PublishPacket
+    // for that topic. Only concrete topic names appear as keys (PUBLISH
+    // topic names never contain wildcards per §4.7.1). Access/mutation is
+    // safe here: this map is local to this shard's thread, never shared.
+    let mut retained: HashMap<String, PublishPacket> = HashMap::new();
 
     for msg in rx {
         match msg {
@@ -156,9 +174,44 @@ pub fn run_broker(rx: Receiver<BrokerMessage>) {
                 clients.insert(id, ClientState { client_id, outbound });
             }
             BrokerMessage::Subscribe { id, topic } => {
-                let subs = topics.entry(topic).or_default();
+                let subs = topics.entry(topic.clone()).or_default();
                 if !subs.contains(&id) {
                     subs.push(id);
+                }
+
+                // ── Retained-message replay (PLAN.md §4 item 4, §3.3.1.3) ──
+                // After registering, immediately deliver any retained message
+                // whose topic matches this filter — exact comparison for plain
+                // filters, topic_matches_filter for wildcards.
+                //
+                // The delivered packet has retain=true so the client can
+                // distinguish a retained replay from a live message (§3.3.1.3).
+                if let Some(client) = clients.get(&id) {
+                    if is_wildcard_filter(&topic) {
+                        // Wildcard: scan all retained topics for matches.
+                        // Collect first to avoid borrowing `retained` mutably
+                        // while also borrowing `clients`.
+                        let matches: Vec<PublishPacket> = retained
+                            .values()
+                            .filter(|p| topic_matches_filter(&p.topic, &topic))
+                            .cloned()
+                            .collect();
+                        for mut pkt in matches {
+                            pkt.retain = true; // mark as retained replay
+                            client.outbound.push(
+                                OutboundEvent::Packet(MqttPacket::Publish(pkt))
+                            );
+                        }
+                    } else {
+                        // Exact match: O(1) lookup.
+                        if let Some(pkt) = retained.get(&topic) {
+                            let mut pkt = pkt.clone();
+                            pkt.retain = true;
+                            client.outbound.push(
+                                OutboundEvent::Packet(MqttPacket::Publish(pkt))
+                            );
+                        }
+                    }
                 }
             }
             BrokerMessage::Unsubscribe { id, topic } => {
@@ -167,6 +220,25 @@ pub fn run_broker(rx: Receiver<BrokerMessage>) {
                 }
             }
             BrokerMessage::Publish { from: _, packet } => {
+                // ── Retained-message store update (§3.3.1.3) ──────────────
+                // Must happen before fan-out so that subscribers who connect
+                // during this very message-loop iteration get the latest
+                // retained value if they also send Subscribe in the same
+                // burst — in practice the ordering is serial so either order
+                // is correct, but storing first is more spec-natural.
+                if packet.retain {
+                    if packet.payload.is_empty() {
+                        // §3.3.1.3: a retain=true PUBLISH with empty payload
+                        // is a "delete" instruction — remove any stored
+                        // retained message for this topic.
+                        retained.remove(&packet.topic);
+                    } else {
+                        // Store (overwriting any previous retained message
+                        // for this exact topic).
+                        retained.insert(packet.topic.clone(), packet.clone());
+                    }
+                }
+
                 // ── Exact-match fast path (unchanged) ──────────────────────
                 // Keep a set of already-notified connection IDs so the wildcard
                 // pass below never double-delivers to a subscriber that also
@@ -1211,5 +1283,282 @@ mod tests {
             out.pop_blocking().is_none(),
             "after cross-shard wildcard unsubscribe, no publish must be delivered"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Retained-message tests  (PLAN.md §4 item 4 / MQTT §3.3.1.3)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a PublishPacket with the given topic/payload/retain flag.
+    fn make_publish(topic: &str, payload: &[u8], retain: bool) -> PublishPacket {
+        PublishPacket {
+            topic: topic.to_string(),
+            payload: payload.to_vec(),
+            qos: 0,
+            retain,
+            packet_id: None,
+        }
+    }
+
+    /// A subscriber that arrives *after* a retained publish on the same topic
+    /// must immediately receive the retained message (§3.3.1.3).
+    #[test]
+    fn retain_then_subscribe_delivers_retained_message() {
+        let (tx, rx) = mpsc::channel::<BrokerMessage>();
+        let broker_thread = thread::spawn(move || run_broker(rx));
+
+        // Publish a retained message before any subscriber exists.
+        tx.send(BrokerMessage::Publish {
+            from: 0,
+            packet: make_publish("home/temp", b"21C", true),
+        }).unwrap();
+
+        // Now a new subscriber arrives.
+        let out = crate::queue::new::<OutboundEvent>(8);
+        tx.send(BrokerMessage::Register {
+            id: 1,
+            client_id: "late-sub".into(),
+            outbound: out.clone(),
+        }).unwrap();
+        tx.send(BrokerMessage::Subscribe {
+            id: 1,
+            topic: "home/temp".into(),
+        }).unwrap();
+
+        drop(tx);
+        broker_thread.join().unwrap();
+
+        out.close();
+        // First event must be the retained replay.
+        match out.pop_blocking().expect("subscriber must receive retained message") {
+            OutboundEvent::Packet(MqttPacket::Publish(p)) => {
+                assert_eq!(p.topic, "home/temp");
+                assert_eq!(p.payload, b"21C");
+                assert!(p.retain, "delivered retained message must have retain=true (§3.3.1.3)");
+            }
+            _ => panic!("expected Publish"),
+        }
+        // No more messages.
+        assert!(out.pop_blocking().is_none(), "no extra events expected");
+    }
+
+    /// A second retain on the same topic overwrites the first. A subscriber
+    /// arriving after both retains must receive only the latest payload.
+    #[test]
+    fn retain_overwrite_new_subscriber_gets_only_latest() {
+        let (tx, rx) = mpsc::channel::<BrokerMessage>();
+        let broker_thread = thread::spawn(move || run_broker(rx));
+
+        // Publish two retained messages for the same topic.
+        tx.send(BrokerMessage::Publish {
+            from: 0,
+            packet: make_publish("sensors/door", b"closed", true),
+        }).unwrap();
+        tx.send(BrokerMessage::Publish {
+            from: 0,
+            packet: make_publish("sensors/door", b"open", true),
+        }).unwrap();
+
+        let out = crate::queue::new::<OutboundEvent>(8);
+        tx.send(BrokerMessage::Register {
+            id: 1,
+            client_id: "late-sub".into(),
+            outbound: out.clone(),
+        }).unwrap();
+        tx.send(BrokerMessage::Subscribe {
+            id: 1,
+            topic: "sensors/door".into(),
+        }).unwrap();
+
+        drop(tx);
+        broker_thread.join().unwrap();
+
+        out.close();
+        match out.pop_blocking().expect("must receive retained message") {
+            OutboundEvent::Packet(MqttPacket::Publish(p)) => {
+                assert_eq!(p.payload, b"open", "only the latest retained payload must be delivered");
+                assert!(p.retain);
+            }
+            _ => panic!("expected Publish"),
+        }
+        assert!(out.pop_blocking().is_none(), "exactly one retained message expected");
+    }
+
+    /// A retain=true publish with an empty payload clears the retained store
+    /// for that topic (§3.3.1.3). A subscriber arriving after the clear must
+    /// receive nothing.
+    #[test]
+    fn retain_empty_payload_clears_stored_message() {
+        let (tx, rx) = mpsc::channel::<BrokerMessage>();
+        let broker_thread = thread::spawn(move || run_broker(rx));
+
+        // Store a retained message.
+        tx.send(BrokerMessage::Publish {
+            from: 0,
+            packet: make_publish("status/light", b"on", true),
+        }).unwrap();
+        // Clear it with an empty-payload retain.
+        tx.send(BrokerMessage::Publish {
+            from: 0,
+            packet: make_publish("status/light", b"", true),
+        }).unwrap();
+
+        let out = crate::queue::new::<OutboundEvent>(8);
+        tx.send(BrokerMessage::Register {
+            id: 1,
+            client_id: "late-sub".into(),
+            outbound: out.clone(),
+        }).unwrap();
+        tx.send(BrokerMessage::Subscribe {
+            id: 1,
+            topic: "status/light".into(),
+        }).unwrap();
+
+        drop(tx);
+        broker_thread.join().unwrap();
+
+        out.close();
+        // After the clear, new subscribers must receive no retained message.
+        assert!(
+            out.pop_blocking().is_none(),
+            "retained store was cleared; new subscriber must receive nothing"
+        );
+    }
+
+    /// A wildcard subscribe after a retained publish on a matching topic must
+    /// still deliver the retained message (same-shard case: both the exact
+    /// topic and the wildcard filter route to the same shard).
+    #[test]
+    fn retain_wildcard_subscribe_receives_retained_message() {
+        let (tx, rx) = mpsc::channel::<BrokerMessage>();
+        let broker_thread = thread::spawn(move || run_broker(rx));
+
+        // Retain a message on "sensors/living/temp".
+        tx.send(BrokerMessage::Publish {
+            from: 0,
+            packet: make_publish("sensors/living/temp", b"22C", true),
+        }).unwrap();
+
+        let out = crate::queue::new::<OutboundEvent>(8);
+        tx.send(BrokerMessage::Register {
+            id: 1,
+            client_id: "wildcard-sub".into(),
+            outbound: out.clone(),
+        }).unwrap();
+        // Subscribe with a wildcard that matches the retained topic.
+        tx.send(BrokerMessage::Subscribe {
+            id: 1,
+            topic: "sensors/+/temp".into(),
+        }).unwrap();
+
+        drop(tx);
+        broker_thread.join().unwrap();
+
+        out.close();
+        match out.pop_blocking().expect("wildcard subscriber must receive retained message") {
+            OutboundEvent::Packet(MqttPacket::Publish(p)) => {
+                assert_eq!(p.topic, "sensors/living/temp");
+                assert_eq!(p.payload, b"22C");
+                assert!(p.retain, "retained replay must have retain=true");
+            }
+            _ => panic!("expected Publish"),
+        }
+        assert!(out.pop_blocking().is_none());
+    }
+
+    /// Cross-shard retained: the retained message's topic hashes to a different
+    /// shard than the wildcard filter. Because wildcard Subscribe is broadcast
+    /// to all shards (DECISIONS.md #9), the shard holding the retained message
+    /// still receives the Subscribe and delivers the replay.
+    ///
+    /// Ordering guarantee (std-only, no sleep):
+    /// We first subscribe a "fence" client to the concrete topic (exact match
+    /// → routes to the same shard as the retained message). We then send the
+    /// retained Publish (also routed to that shard). We block-wait on the fence
+    /// client's queue: when it receives the publish, we know that shard has
+    /// fully processed the BrokerMessage::Publish — meaning the retain store has
+    /// been updated — before we send the wildcard Subscribe. This is race-free.
+    #[test]
+    fn retain_cross_shard_wildcard_subscribe_receives_retained_message() {
+        const N: usize = 4;
+        let broker = spawn_sharded_broker(N);
+
+        let wildcard_filter = "sensors/+/temp";
+        let wildcard_shard = shard_for_topic(wildcard_filter, N);
+
+        // Find a concrete topic that (a) matches the wildcard and (b) hashes
+        // to a DIFFERENT shard — this forces the cross-shard scenario.
+        let concrete_topic: String = (0u64..)
+            .map(|i| format!("sensors/{}/temp", i))
+            .find(|t| shard_for_topic(t, N) != wildcard_shard)
+            .expect("must find a cross-shard topic within finite search");
+
+        assert_ne!(
+            shard_for_topic(&concrete_topic, N),
+            wildcard_shard,
+            "test setup: concrete topic and wildcard filter must be on different shards"
+        );
+
+        // ── Step 1: Register a "fence" subscriber on the concrete topic. ────
+        // Because this is an exact-match subscribe, it routes to the same shard
+        // as the concrete topic. When the fence receives the live publish, it
+        // proves the retain store on that shard has been updated.
+        let fence_out = crate::queue::new::<OutboundEvent>(4);
+        broker.send(BrokerMessage::Register {
+            id: 51,
+            client_id: "fence".into(),
+            outbound: fence_out.clone(),
+        }).unwrap();
+        broker.send(BrokerMessage::Subscribe {
+            id: 51,
+            topic: concrete_topic.clone(),
+        }).unwrap();
+
+        // ── Step 2: Send the retained Publish. ─────────────────────────────
+        broker.send(BrokerMessage::Publish {
+            from: 0,
+            packet: make_publish(&concrete_topic, b"99C", true),
+        }).unwrap();
+
+        // ── Step 3: Block until the fence receives the live publish. ────────
+        // This guarantees the retain store on that shard is updated before we
+        // send the wildcard Subscribe.
+        match fence_out.pop_blocking().expect("fence must receive the live publish") {
+            OutboundEvent::Packet(MqttPacket::Publish(p)) => {
+                assert_eq!(p.topic, concrete_topic, "fence got wrong topic");
+            }
+            _ => panic!("fence expected Publish"),
+        }
+
+        // ── Step 4: Now subscribe with the wildcard — retain is guaranteed. ─
+        let out = crate::queue::new::<OutboundEvent>(8);
+        broker.send(BrokerMessage::Register {
+            id: 50,
+            client_id: "xshard-retain-sub".into(),
+            outbound: out.clone(),
+        }).unwrap();
+        broker.send(BrokerMessage::Subscribe {
+            id: 50,
+            topic: wildcard_filter.to_string(),
+        }).unwrap();
+
+        // pop_blocking() BEFORE drop(broker): the queue blocks until the shard
+        // processes the Subscribe and delivers the retained replay. This matches
+        // the wildcard_cross_shard_delivers pattern.
+        match out.pop_blocking().expect(
+            "cross-shard wildcard subscriber must receive retained message"
+        ) {
+            OutboundEvent::Packet(MqttPacket::Publish(p)) => {
+                assert_eq!(p.topic, concrete_topic);
+                assert_eq!(p.payload, b"99C");
+                assert!(p.retain, "cross-shard retained replay must have retain=true");
+            }
+            _ => panic!("expected Publish"),
+        }
+
+        // Shut down shards, then drain to confirm no duplicate deliveries.
+        drop(broker);
+        out.close();
+        assert!(out.pop_blocking().is_none(), "no duplicate deliveries");
     }
 }

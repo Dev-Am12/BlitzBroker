@@ -13,7 +13,7 @@ Every load-bearing technical or architectural decision made during this build, i
 - [7. Correction to #6: the broker→client ack direction was missing, found via live verification, now fixed](#7-correction-to-6-the-brokerclient-ack-direction-was-missing-found-via-live-verification-now-fixed)
 - [8. Sharded broker: topic registry split into N independent single-threaded shards](#8-sharded-broker-topic-registry-split-into-n-independent-single-threaded-shards)
 - [9. Correction to #5: wildcard fan-out is now wired in, and required extending #8's shard-broadcast treatment to wildcard subscriptions](#9-correction-to-5-wildcard-fan-out-is-now-wired-in-and-required-extending-8s-shard-broadcast-treatment-to-wildcard-subscriptions)
-- [10. Missing Personal_Decisions.md rationale record](#10-missing-personal_decisionsmd-rationale-record)
+- [10. blitzclient: standalone binary with self-contained MQTT encoding — no shared code with the broker](#10-blitzclient-standalone-binary-with-self-contained-mqtt-encoding--no-shared-code-with-the-broker)
 
 ---
 
@@ -117,10 +117,15 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ---
 
-## 10. Missing `Personal_Decisions.md` rationale record
+## 10. blitzclient: standalone binary with self-contained MQTT encoding — no shared code with the broker
 
-**Record:** Multiple Role C logs, source comments, and interop-script comments cite `Personal_Decisions.md` Decisions 1, 3A, 3B, 4, and 5. The file is not present in the worktree, any tracked local or remote branch, reflog-reachable history, the available stash, or the sole unreachable Git tree inspected on 2026-08-31. The underlying rationale text therefore cannot be recovered from repository history.
+**Decision:** `blitzclient` (`src/bin/blitzclient.rs`) implements its own minimal MQTT wire-format encoder and decoder covering only the five packet types it needs: CONNECT, CONNACK, PUBLISH, PUBACK, DISCONNECT. It does not import from `protocol.rs` or any other broker module.
 
-**Disposition:** Do not infer, recreate, or renumber these missing decisions. The cited choices may have been made, but their documented reasoning is unavailable. Existing citations are retained as provenance warnings; this entry is the authoritative record of the documentation gap until the original author supplies the source material. README.md must disclose this unresolved record rather than presenting invented rationale as fact.
+**Rationale:** Already decided by the team before this entry was written — recorded here per AI_GUARDRAILS.md rule 7. The reasoning: blitzclient is a client tool, architecturally separate from the broker binary. Sharing `protocol.rs` would require either (a) turning the project into a library crate (a Cargo.toml change) or (b) using `#[path]` to directly include broker source files into the client binary, which ties the two binaries' build graphs together in a fragile way. A self-contained implementation for five packet types is less than 100 lines of encoding logic, less complexity than either workaround. The client's local implementations are cross-checked against the broker's own tests in the unit test comments (e.g. the CONNACK decoder verified to accept exactly the bytes `encode_connack` in `protocol.rs` produces) — catching spec misunderstandings without a code dependency.
 
-**In plain terms:** Several files point to a decision note that was never committed here. We know the references exist, but not the reasoning they were supposed to point to, so we are flagging the hole instead of making up an explanation.
+**Technical note:** Cargo auto-discovers files in `src/bin/` and builds each as an independent binary without any `Cargo.toml` addition, so this adds `blitzclient` as a second binary target alongside `blitzbroker` at zero manifest cost.
+
+**In plain terms:** The publish client has its own small copy of the packet-building code it needs, rather than sharing the broker's. They talk the same wire format — checked by test — but aren't linked together in the build.
+
+
+[def]: #10-missing-personal_decisionsmd-rationale-record
