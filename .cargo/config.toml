@@ -1,5 +1,14 @@
 [build]
-# --remap-path-prefix rewrites every absolute source path embedded in the binary
-# to a stable relative form ("blitzbroker/src/...").
-# This makes the binary identical regardless of where the repo is checked out.
-rustflags = ["--remap-path-prefix", "=blitzbroker/"]
+# --remap-path-prefix : rewrites every absolute source path embedded in the binary
+#                       to the stable relative prefix "blitzbroker/", making the
+#                       binary independent of checkout location.
+# -C link-arg=/Brepro : Windows/MSVC-specific. The MSVC linker injects the current
+#                       timestamp into the PE COFF header's TimeDateStamp field by
+#                       default, making every build unique at the binary level even
+#                       when all source and compiler inputs are identical. /Brepro
+#                       replaces that live timestamp with a hash derived from the
+#                       binary's own contents, restoring determinism on Windows.
+rustflags = [
+    "--remap-path-prefix", "=blitzbroker/",
+    "-C", "link-arg=/Brepro",
+]

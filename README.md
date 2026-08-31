@@ -25,7 +25,7 @@ Run the test suite:
 
 ```bash
 cargo test
-# 77 passed, 0 failed, at last verification (2026-08-31, see below).
+# 118 passed, 0 failed, at last verification (2026-08-31, see below).
 ```
 
 ## What it does
@@ -180,7 +180,7 @@ Important parser/encoder boundaries:
 | Retained messages | Skipped | RETAIN is not a store/replay feature. |
 | Last-will messages | Skipped | CONNECT with a will flag is rejected. |
 | Keep-alive enforcement | Skipped | Keep-alive is parsed but not used for timeout/disconnect. |
-| Reproducible build | **Achieved** | Two isolated release builds from **different directory paths** under rustc 1.97.1 produced byte-identical SHA-256 hashes. Toolchain pinned via `rust-toolchain.toml`; paths remapped via `.cargo/config.toml`; `codegen-units=1`, `debug=false` in `[profile.release]`. Proof in `proof/reproducible-build.md`. |
+| Reproducible build | **Achieved** | Two consecutive clean builds and two builds from different directory paths under rustc 1.97.1 all produced the same SHA-256. Toolchain pinned via `rust-toolchain.toml`; MSVC PE timestamp fixed via `-C link-arg=/Brepro`; paths remapped via `--remap-path-prefix`; `codegen-units=1`, `debug=false` in `[profile.release]`. Proof in `proof/reproducible-build.md`. |
 
 Out of scope: QoS 2, MQTT 5.0, persistent sessions, authentication/ACLs, encrypted transport, and a complete MQTT compliance implementation.
 
@@ -188,7 +188,7 @@ Out of scope: QoS 2, MQTT 5.0, persistent sessions, authentication/ACLs, encrypt
 
 The following were personally run against this worktree on 2026-08-31:
 
-- `cargo test` completed with **77 passed, 0 failed**.
+- `cargo test` completed with **118 passed, 0 failed**.
 - The release build completed successfully (with non-fatal dead-code warnings in the current source).
 - `python tests/interop/paho_client.py` passed: a paho-mqtt publisher and subscriber exchanged a byte-exact QoS 0 payload through the release broker.
 - A separate live paho MQTT 3.1.1 check passed: a QoS 1 publisher received its PUBACK, and a subscriber on `role-d/+/temp` received the publish to `role-d/kitchen/temp` at QoS 1.
@@ -223,13 +223,15 @@ A saved copy of this output is committed at [`proof/cargo-tree.txt`](proof/cargo
 
 ## Reproducible build evidence
 
-Reproducible builds are achieved via three mechanisms:
+Reproducible builds are achieved via four mechanisms:
 
 1. **`rust-toolchain.toml`** — pins `rustc 1.97.1`; `rustup` installs it automatically.
-2. **`.cargo/config.toml`** — `--remap-path-prefix` rewrites all absolute checkout paths to `blitzbroker/` before they are embedded in the binary.
-3. **`[profile.release]`** in `Cargo.toml` — `codegen-units=1` (single deterministic CGU) and `debug=false` (no debug-info section, belt-and-suspenders path stripping).
+2. **`.cargo/config.toml`** — two `rustflags` entries:
+   - `--remap-path-prefix =blitzbroker/` — rewrites all absolute checkout paths embedded in the binary to the stable relative prefix `blitzbroker/`.
+   - `-C link-arg=/Brepro` — Windows/MSVC-specific: instructs the linker to replace the `TimeDateStamp` field in the PE COFF header (offset 0xF0) with a content-derived hash instead of the current wall-clock time. Without this flag every Windows build is unique at the binary level regardless of source inputs.
+3. **`[profile.release]`** in `Cargo.toml` — `codegen-units=1` (single deterministic CGU) and `debug=false` (removes debug-info section entirely).
 
-Two builds from **different directory paths** produced byte-identical SHA-256 hashes. Full proof (hash, method, reproduce-yourself command) is in [`proof/reproducible-build.md`](proof/reproducible-build.md).
+Two consecutive **clean** builds and two builds from **different directory paths** all produced the same SHA-256 hash. Full proof (hashes, method, reproduce-yourself command) is in [`proof/reproducible-build.md`](proof/reproducible-build.md).
 
 `STDLIB.md` documents the standard-library replacements for async/networking, registries, queueing, CLI parsing, logging, packet encoding, QoS1/PUBACK, wildcard matching, and connection IDs.
 
@@ -237,7 +239,7 @@ Two builds from **different directory paths** produced byte-identical SHA-256 ha
 
 This section exists so a judge does not have to find these out the hard way. As of the last audit (2026-08-31):
 
-- **No OSI license file is present.** The event rules require a public repo with an OSI-approved license; without a `LICENSE` file this requirement is not currently met.
+- **OSI license:** A `LICENSE` file is present in the repository root.
 - **No demo video is present.** The 5-minute demo video is a required deliverable and has not been recorded/attached as of this writing.
 - **`proof/cargo-tree.txt` is now committed** alongside the command that produces it.
 - **`Personal_Decisions.md` is cited but missing.** Older internal logs and source comments reference a `Personal_Decisions.md` for several engineering rationales (decisions 1, 3A, 3B, 4, and 5 by that document's numbering). It is not present in this worktree or in any recoverable branch/reflog/stash history. That rationale has not been reconstructed or invented to fill the gap — DECISIONS.md #10 is the authoritative record of this specific documentation loss, and it should be read alongside any surviving reference to `Personal_Decisions.md` elsewhere in this repo.

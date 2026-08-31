@@ -153,17 +153,26 @@ Every load-bearing technical or architectural decision made during this build, i
 
 ---
 
-## 14. Reproducible build: achieved via toolchain pin, path remapping, and single-CGU profile
+## 14. Reproducible build: achieved via toolchain pin, path remapping, single-CGU profile, and MSVC /Brepro
 
-**Decision:** Implement the reproducible-build bonus (+5) using three coordinated mechanisms: (1) `rust-toolchain.toml` pinning `1.97.1`, (2) `.cargo/config.toml` with `rustflags = ["--remap-path-prefix", "=blitzbroker/"]`, and (3) `[profile.release]` with `codegen-units=1` and `debug=false`.
+**Decision:** Implement the reproducible-build bonus (+5) using four coordinated mechanisms: (1) `rust-toolchain.toml` pinning `1.97.1`, (2) `.cargo/config.toml` with `--remap-path-prefix =blitzbroker/` and `-C link-arg=/Brepro`, (3) `[profile.release]` with `codegen-units=1` and `debug=false`.
 
-**Rationale:** PLAN.md §4 item 7 listed this as a stretch goal; it was previously logged in the scope-completion ledger as "attempted, not achieved" because two builds under the same toolchain produced different SHA-256 hashes. The root causes of that failure: (a) absolute checkout paths embedded in debug-info sections differed between machines/directories, (b) multiple CGUs introduce parallel-ordering non-determinism in symbol layout, (c) no toolchain pin meant the compiler version itself was not guaranteed identical. All three are addressed directly:
-- `rust-toolchain.toml` ensures identical compiler version everywhere `rustup` is installed.
-- `--remap-path-prefix` with an empty source prefix rewrites every embedded absolute path to the stable relative prefix `blitzbroker/`, making path-dependent binary sections identical regardless of checkout location.
-- `codegen-units=1` compiles everything as a single unit, eliminating CGU-ordering non-determinism.
-- `debug=false` removes the debug-info section entirely — belt-and-suspenders, since path remapping already neutralises the paths, but removing the section is the cleanest guarantee.
+**Rationale:** PLAN.md §4 item 7 listed this as a stretch goal. An initial implementation (path remapping + single CGU + no debug info) was externally verified by a teammate and **failed**: two consecutive clean builds produced different SHA-256 hashes. Binary diffing identified the first discrepancy at **offset 0xF0 (240)** — the `TimeDateStamp` field in the PE COFF File Header. The MSVC linker injects the current wall-clock timestamp into this field by default on every link, making every Windows binary unique regardless of compiler inputs.
 
-Verified by building from two different directory paths (`C:\GitHub Desktop\BlitzBoard` and a temp copy at `C:\Users\kshir\AppData\Local\Temp\blitzbroker-repro-test`) and confirming SHA-256 hashes are identical. Proof committed to `proof/reproducible-build.md`.
+The complete set of root causes and their fixes:
 
-**In plain terms:** Two builds of the exact same code from two completely different folder locations on disk produce byte-for-byte identical binaries. A judge can run `cargo build --release` anywhere, hash the result, and get the same SHA-256 we published. The three-part fix: lock the compiler version, erase the folder path from the binary, and force a single predictable compilation unit.
+| Root cause | Fix |
+|---|---|
+| Absolute checkout path embedded in debug-info | `--remap-path-prefix =blitzbroker/` in rustflags |
+| Parallel CGU ordering non-determinism | `codegen-units = 1` in `[profile.release]` |
+| Debug-info section with embedded paths | `debug = false` in `[profile.release]` (belt-and-suspenders) |
+| **MSVC PE `TimeDateStamp` (offset 0xF0)** | **`-C link-arg=/Brepro`** — replaces live timestamp with content hash |
+| Toolchain version drift | `rust-toolchain.toml` pinning `rustc 1.97.1` |
+
+`/Brepro` instructs the MSVC linker to derive the `TimeDateStamp` field deterministically from the binary's own content hash rather than the wall clock. This is the Windows-specific fix that the first implementation missed.
+
+Verified: four builds total — two consecutive clean builds and two builds from different directory paths — all produced SHA-256 `4D62CFB48F1B3377A7AC24C302E5FCF5D63604BAC89DBB5D0C7FE78822FF0278`. Full proof in `proof/reproducible-build.md`.
+
+**In plain terms:** The first attempt failed because we forgot that the Windows linker secretly stamps the current time into every binary it produces. Adding `/Brepro` tells it to use a content-based hash instead of the clock. With that plus the toolchain pin and path-erasure flags, four independent builds all produce the exact same binary.
+
 
